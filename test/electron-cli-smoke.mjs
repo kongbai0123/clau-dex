@@ -42,6 +42,14 @@ async function main() {
     await window.webContents.insertText('CLI 連線驗證');
     await until(()=>js("!document.querySelector('#submit-task').disabled&&!document.querySelector('#submit-task').hidden"),'Send remained disabled despite working authenticated CLIs.');
     assert.equal(await js("document.querySelector('#composer-error').hidden"), true);
+    // The AI picker is a multi-select: task-ready agents can be toggled, the rest are shown but disabled.
+    await js("document.querySelector('#chat-options').open=true");
+    const chips = await js("Array.from(document.querySelectorAll('[data-participant]')).map(el=>({id:el.dataset.participant,selected:el.classList.contains('selected'),disabled:el.disabled}))");
+    assert.deepEqual(chips.map(chip=>chip.id), ['codex','claude','antigravity']);
+    assert.deepEqual(chips.filter(chip=>chip.selected).map(chip=>chip.id), ['codex','claude']);
+    assert.equal(chips.find(chip=>chip.id==='antigravity').disabled, true);
+    writeFileSync(path.join(artifacts, 'options.png'), (await window.webContents.capturePage()).toPNG());
+    await js("document.querySelector('#chat-options').open=false");
     await js("if(document.querySelector('#toggle-inspector').getAttribute('aria-expanded')!=='true')document.querySelector('#toggle-inspector').click();document.querySelector('[data-inspector-tab=system]').click()");
     const shownNames = JSON.stringify(['codex','claude'].map(agent => path.basename(report.agents[agent].commandPath)));
     await until(()=>js(`${shownNames}.every(name=>document.querySelector('#inspector-body').textContent.includes(name))`),'Discovered CLI paths were not shown.');

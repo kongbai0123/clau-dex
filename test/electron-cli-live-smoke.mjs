@@ -63,7 +63,7 @@ async function main() {
       await click('#new-conversation');
       await until(()=>js("document.querySelectorAll('[data-message-role]').length===0&&!document.querySelector('#task-description').disabled"),'New room was not ready.');
       await click('#chat-options summary');
-      await click(`[data-workflow="${agent}"]`);
+      await js(`(()=>{const want='${agent}';const chip=id=>document.querySelector('[data-participant='+id+']');if(!chip(want).classList.contains('selected'))chip(want).click();let other;while((other=Array.from(document.querySelectorAll('[data-participant].selected')).find(el=>el.dataset.participant!==want)))other.click();})()`);
       const marker = `BRIDGE_${agent.toUpperCase()}_LIVE_OK`;
       const message = `本次只驗證聊天室傳送與回覆。請只回覆 ${marker}，不要讀寫檔案、執行指令或呼叫任何工具。`;
       await js("document.querySelector('#task-description').focus()");

@@ -101,7 +101,7 @@ async function main() {
     assert.equal(services.store.listAll().some(item => item.conversationId===firstRoom), false);
     assert.equal(existsSync(imageTask.attachments[0].path), false); assert.equal(existsSync(imageOnly.attachments[0].path), true);
     await click('[data-view=workspace]'); await pause(120); await click('#new-conversation'); await pause(120);
-    await js("document.querySelector('[data-workflow=claude]').click()");
+    await js("(()=>{const want='claude';const chip=id=>document.querySelector('[data-participant='+id+']');if(!chip(want).classList.contains('selected'))chip(want).click();let other;while((other=Array.from(document.querySelectorAll('[data-participant].selected')).find(el=>el.dataset.participant!==want)))other.click();})()");
     await send('等待刪除執行中的對話'); await until(() => task('等待刪除執行中的對話')?.status==='running' && existsSync(`${capture}.child`), 'Running task did not start.');
     const runningRoom = task('等待刪除執行中的對話').conversationId;
     report.runningWorkerPids = [...runtime.activeProcesses().map(item=>item.pid), Number(readFileSync(`${capture}.child`, 'utf8'))];

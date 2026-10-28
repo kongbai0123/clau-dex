@@ -14,10 +14,11 @@ Clau-dex 是一款 Windows 桌面應用，讓 Codex CLI 與 Claude Code CLI 共�
 ## 主要功能
 
 - **共用聊天室**：依工作資料夾分開保存對話，支援續問、取消執行與歷史對話。
-- **Codex／Claude 協作**：由統籌方拆解任務、指派執行者並複核結果；若額度用盡，可由另一方接手同一階段。
+- **Codex／Claude 協作**：在對話選項的「參與的 AI」中，可以複選要納入的 AI。只選一個時，由它直接回覆；選兩個以上時，由統籌方拆解任務、指派執行者並複核結果。若某方額度用盡，會由其他已勾選的 AI 接手同一階段。
 - **圖片輸入**：支援貼上、選檔、拖放與圖片續問。
 - **觀察面板**：查看 CLI 狀態、用量、對話進度、Token 統計與程序資訊。
-- **桌面 App 管理**：查看 Codex 與 Claude App 狀態，並管理由本程式啟動的 App。
+- **桌面 App 管理**：查看 Codex、Claude 與 Antigravity App 的狀態，並管理由本程式啟動的 App。
+- **引導式登入**：CLI 未登入時，可以在 App 管理或聊天室按「登入」。程式會開啟該 CLI 官方的登入視窗，你在瀏覽器完成授權後，畫面會自動更新。憑證由 CLI 自行保存，Bridge 不會讀取。
 - **Codex MCP 整合**：提供 `check_bridge` 與 `delegate_to_claude` 工具。
 
 ## 系統需求
@@ -26,12 +27,14 @@ Clau-dex 是一款 Windows 桌面應用，讓 Codex CLI 與 Claude Code CLI 共�
 - Node.js 22.12.0 以上與 npm
 - 若要執行 Agent 任務，需安裝並登入 Codex CLI 與 Claude Code CLI
 
-登入指令：
+可以在 App 管理按「登入」，也可以自行執行登入指令：
 
 ```powershell
 codex login
 claude auth login
 ```
+
+Antigravity（Google）目前只在 App 管理中顯示桌面 App 狀態與登入狀態，還不能接聊天室任務。登入狀態的判斷方式是檢查 Windows 認證管理員中有沒有名為 `gemini:antigravity` 的項目，只看名稱，不讀取內容。接任務需要 `agy` CLI，目前尚未完成驗證。
 
 ## 安裝與啟動
 
@@ -65,6 +68,8 @@ node node_modules\electron\install.js
 ```
 
 也可執行 `npm run desktop`，或雙擊 `啟動管理器.cmd`。再次啟動會切換至既有管理視窗。
+
+執行過一次 `launch.ps1` 後，專案資料夾中會出現 `Clau-dex.lnk` 捷徑。它直接啟動 Electron，完全不會出現命令列視窗，可以把它釘選到開始功能表或工作列。`啟動管理器.cmd` 則會在交給 Electron 後立即關閉命令列視窗。
 
 ## 使用方式
 
@@ -110,7 +115,8 @@ Codex MCP 的工具逾時為 660 秒。桌面聊天室中的一般任務最長�
 
 ## 疑難排解
 
-- **CLI 顯示尚不可用**：觀察面板的「系統」頁會顯示實際 CLI 路徑與錯誤。程式會先檢查啟動環境的 PATH，再搜尋 Windows 常見安裝位置。若設定 `AGENT_HUB_CODEX_COMMAND` 或 `AGENT_HUB_CLAUDE_COMMAND`，指定指令會優先使用；若找不到，不會改用其他安裝。
+- **CLI 顯示尚不可用**：觀察面板的「系統」頁會顯示實際 CLI 路徑與錯誤。程式會先檢查啟動環境的 PATH，再搜尋 Windows 常見安裝位置。若設定 `AGENT_HUB_CODEX_COMMAND`、`AGENT_HUB_CLAUDE_COMMAND` 或 `AGENT_HUB_ANTIGRAVITY_COMMAND`，指定指令會優先使用；若找不到，不會改用其他安裝。
+- **按「登入」後畫面沒有更新**：完成瀏覽器授權後，若登入視窗沒有自動關閉，請手動關閉。程式最多等待 5 分鐘；逾時後可以按重新整理，或再登入一次。
 - **連接埠 47931 已被占用**：先關閉另一個管理器，再重新啟動。
 - **MCP 工具沒有出現在 Codex**：確認管理器正在執行，並在 `setup.ps1` 完成後重新啟動 Codex。
 

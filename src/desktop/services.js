@@ -8,8 +8,13 @@ import { createConversationStore } from "../conversation-store.js";
 import { createUsageMonitor } from "../usage-monitor.js";
 import { createClaudeQuotaCache } from "../claude-quota-cache.js";
 import { createChatAttachments } from "../chat-attachments.js";
+import { PROVIDER_IDS, PROVIDERS, providerSummaries } from "../providers.js";
 
-export function createDesktopServices({ projectRoot, dataDirectory = path.join(projectRoot, ".bridge"), runtime: suppliedRuntime, appManager: suppliedApps, usageMonitor: suppliedUsage, port = 47931, onChange = () => {} }) {
+const LOGIN_POLL_MS = 3000;
+const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+
+export function createDesktopServices({ projectRoot, dataDirectory = path.join(projectRoot, ".bridge"), runtime: suppliedRuntime, appManager: suppliedApps, usageMonitor: suppliedUsage, port = 47931, onChange = () => {},
+  loginPollMs = LOGIN_POLL_MS, loginTimeoutMs = LOGIN_TIMEOUT_MS }) {
   const store = createTaskStore(dataDirectory);
   const conversationStore = createConversationStore(dataDirectory);
   const attachmentStore = createChatAttachments(dataDirectory);
@@ -22,8 +27,10 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
   const usageMonitor = suppliedUsage || createUsageMonitor();
   let settings = store.loadSettings({ workspace: projectRoot });
   const unknown = { available: false, authenticated: null, version: "", error: "正在檢查連線" };
-  let agents = { codex: { ...unknown }, claude: { ...unknown } };
-  let apps = { codex: { installed: false, running: false, managed: false, pids: [] }, claude: { installed: false, running: false, managed: false, pids: [] } };
+  let agents = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { ...unknown }]));
+  let apps = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { installed: false, running: false, managed: false, pids: [] }]));
+  // Guided sign-in per agent: { state: "pending" | "failed", message, startedAt }. Cleared once the CLI reports signed in.
+  const logins = new Map();
   let shuttingDown = false; let closed = null; let refreshing = null; let usageRefreshing = null; let timer = null;
   let quotaRefreshing = null; let quotaController = null; let lastQuotaAttempt = 0;
   const taskManager = createTaskManager({ store, runtime, onChange });
@@ -32,7 +39,8 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
     const allTasks = store.listAll();
     const usage = usageMonitor.get() || {};
     return {
-      agents, apps, settings: { ...settings }, bridge: bridge.getStatus(), shuttingDown,
+      agents: Object.fromEntries(Object.entries(agents).map(([id, agent]) => [id, logins.has(id) ? { ...agent, login: { ...logins.get(id) } } : agent])),
+      providers: providerSummaries(), apps, settings: { ...settings }, bridge: bridge.getStatus(), shuttingDown,
       usage: { ...usage, claude: { ...(usage.claude || {}), ...quotaCache.snapshot() } },
       conversations: conversationStore.list(allTasks),
       tasks: store.list().map(task => {
@@ -58,7 +66,8 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
       const results = await Promise.allSettled([runtime.probe(), appManager.list()]);
       if (!shuttingDown) {
         if (results[0].status === "fulfilled") agents = results[0].value;
-        else agents = { codex: { ...unknown, error: results[0].reason.message }, claude: { ...unknown, error: results[0].reason.message } };
+        else agents = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { ...unknown, error: results[0].reason.message }]));
+        for (const id of PROVIDER_IDS) if (agents[id]?.authenticated && logins.get(id)?.state === "failed") logins.delete(id);
         if (results[1].status === "fulfilled") apps = results[1].value;
         if (refreshQuota) refreshClaudeQuota({ force: true }).catch(() => {});
         onChange();
@@ -117,6 +126,42 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
     if (changes.workspace !== undefined && typeof changes.workspace !== "string") throw new Error("無效的專案路徑。");
     if (changes.closeLaunchedApps !== undefined && typeof changes.closeLaunchedApps !== "boolean") throw new Error("無效的關閉設定。");
     settings = store.saveSettings({ ...settings, ...changes }); onChange(); return settings;
+  }
+  /**
+   * Opens the agent CLI's own sign-in console and waits, polling only that agent, until the CLI reports it is
+   * signed in, the console closes, or the wait times out. Bridge never sees the credentials.
+   */
+  async function loginAgent(id) {
+    if (shuttingDown) throw new Error("管理器正在關閉。");
+    if (!PROVIDER_IDS.includes(id)) throw new Error("無效的 AI。");
+    if (logins.get(id)?.state === "pending") throw new Error(`${PROVIDERS[id].appName} 的登入視窗已經開啟，請在瀏覽器完成授權。`);
+    if (!agents[id]?.available) throw new Error(`${PROVIDERS[id].appName} CLI 尚未安裝或無法執行，無法從這裡登入。`);
+    const session = await runtime.login(id);
+    const login = { state: "pending", message: "已開啟登入視窗，請在瀏覽器完成授權。", startedAt: new Date().toISOString() };
+    logins.set(id, login); onChange();
+    let consoleClosed = false;
+    session.exited.then(() => { consoleClosed = true; });
+    const deadline = Date.now() + loginTimeoutMs;
+    (async () => {
+      let closedChecks = 0;
+      while (!shuttingDown && logins.get(id) === login) {
+        await new Promise((resolve) => setTimeout(resolve, loginPollMs));
+        if (shuttingDown || logins.get(id) !== login) return;
+        let status;
+        try { status = await runtime.probeAgent(id); } catch { status = null; }
+        if (status) agents = { ...agents, [id]: status };
+        if (status?.authenticated) {
+          logins.delete(id); onChange();
+          if (id === "claude") refreshClaudeQuota({ force: true }).catch(() => {});
+          return;
+        }
+        // The CLI may save credentials just after its console closes; give it one more check.
+        if (consoleClosed && ++closedChecks > 1) { logins.set(id, { ...login, state: "failed", message: "登入視窗已關閉，但尚未偵測到登入。可以再試一次。" }); onChange(); return; }
+        if (Date.now() > deadline) { logins.set(id, { ...login, state: "failed", message: "等待登入逾時。完成授權後按重新整理，或再試一次。" }); onChange(); return; }
+        onChange();
+      }
+    })().catch(() => {});
+    return { id, login: { ...login } };
   }
   async function launchApp(id) { if (shuttingDown) throw new Error("管理器正在關閉。"); apps = { ...apps, [id]: await appManager.launch(id) }; onChange(); return apps[id]; }
   async function closeApp(id) { apps = { ...apps, [id]: await appManager.close(id) }; onChange(); return apps[id]; }
@@ -188,10 +233,10 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
     })();
     return closed;
   }
-  return { start, snapshot, refreshStatus, refreshClaudeQuota, updateSettings, launchApp, closeApp, shutdown, createConversation, sendMessage, importImages, deleteConversation,
+  return { start, snapshot, refreshStatus, refreshClaudeQuota, updateSettings, loginAgent, launchApp, closeApp, shutdown, createConversation, sendMessage, importImages, deleteConversation,
     resumeTask: (id, note) => { const task = taskManager.resume(id, note); onChange(); return task; },
     createTask: input => taskManager.submit({ title: input?.title, task: input?.task, workspace: input?.workspace,
-      workflow: input?.workflow, mode: input?.mode, effort: input?.effort, coordinator: input?.coordinator, max_turns: input?.max_turns, source: "desktop" }), cancelTask: id => taskManager.cancel(id),
+      workflow: input?.workflow, participants: input?.participants, mode: input?.mode, effort: input?.effort, coordinator: input?.coordinator, max_turns: input?.max_turns, source: "desktop" }), cancelTask: id => taskManager.cancel(id),
     startBridge: () => { if (shuttingDown) throw new Error("管理器正在關閉。"); return bridge.start(); }, stopBridge: () => bridge.stop(),
     taskManager, runtime, store, conversationStore, quotaCache, attachmentStore,
   };

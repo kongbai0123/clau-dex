@@ -1,16 +1,36 @@
 import { execFile as nodeExecFile, spawn as nodeSpawn } from "node:child_process";
 import path from "node:path";
+import { PROVIDER_IDS, PROVIDERS } from "./providers.js";
 
-const APP_IDS = ["codex", "claude"];
-const APP_NAMES = { codex: "Codex", claude: "Claude" };
+const APP_IDS = PROVIDER_IDS;
+const APP_NAMES = Object.fromEntries(APP_IDS.map((id) => [id, PROVIDERS[id].appName]));
 const INVENTORY_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $apps = @(Get-StartApps | Where-Object {
   $_.AppID -match '^OpenAI\.Codex_[A-Za-z0-9]+![A-Za-z0-9._-]+$' -or
-  $_.AppID -match '^Claude_[A-Za-z0-9]+!Claude$'
+  $_.AppID -match '^Claude_[A-Za-z0-9]+!Claude$' -or
+  $_.AppID -match '^(?:Google\.Antigravity|com\.google\.antigravity)$'
 } | Select-Object Name, AppID)
-$processes = @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe' OR Name = 'Codex.exe' OR Name = 'Claude.exe'" | ForEach-Object {
+# Unpackaged apps launch through a Start menu shortcut; skip ones whose target was moved or removed.
+$menus = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('CommonStartMenu')) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$shell = $null; $wsh = $null
+# Rank: 2 = working shortcut or packaged, 1 = no shortcut found, 0 = broken shortcut (dropped).
+$index = 0
+$apps = @($apps | ForEach-Object {
+  $index++; $rank = 2
+  if ($_.AppID -notmatch '!') {
+    if (-not $shell) { $shell = New-Object -ComObject Shell.Application; $wsh = New-Object -ComObject WScript.Shell }
+    $id = $_.AppID
+    $links = @(Get-ChildItem -LiteralPath $menus -Recurse -Filter ($_.Name + '.lnk') -ErrorAction SilentlyContinue | Where-Object {
+      [string]$shell.Namespace($_.DirectoryName).ParseName($_.Name).ExtendedProperty('System.AppUserModel.ID') -ieq $id
+    })
+    if (-not $links.Count) { $rank = 1 }
+    elseif (-not @($links | Where-Object { $target = $wsh.CreateShortcut($_.FullName).TargetPath; -not $target -or (Test-Path -LiteralPath $target) }).Count) { $rank = 0 }
+  }
+  if ($rank) { [pscustomobject]@{ Name = $_.Name; AppID = $_.AppID; Rank = $rank; Index = $index } }
+} | Sort-Object @{ Expression = 'Rank'; Descending = $true }, Index | Select-Object Name, AppID)
+$processes = @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe' OR Name = 'Codex.exe' OR Name = 'Claude.exe' OR Name = 'Antigravity.exe'" | ForEach-Object {
   [ordered]@{
     pid = [int]$_.ProcessId
     parentPid = [int]$_.ParentProcessId
@@ -28,7 +48,7 @@ const CLOSE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $expected = $env:CODEX_CLAUDE_BRIDGE_OWNED_APP | ConvertFrom-Json
-if (@('codex', 'claude') -notcontains $expected.app) { throw 'Unknown managed app.' }
+if (@('codex', 'claude', 'antigravity') -notcontains $expected.app) { throw 'Unknown managed app.' }
 if ([int]$expected.pid -le 0) { throw 'Invalid managed process.' }
 function Get-VerifiedProcess {
   $candidate = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$expected.pid)
@@ -54,11 +74,15 @@ if (Get-VerifiedProcess) { Stop-Process -Id ([int]$expected.pid) -ErrorAction St
 '{"status":"closed"}'
 `;
 
+// Antigravity's agent app, not the separate Antigravity IDE.
+const APP_ID_PATTERNS = {
+  codex: /^OpenAI\.Codex_[A-Za-z0-9]+![A-Za-z0-9._-]+$/i,
+  claude: /^Claude_[A-Za-z0-9]+!Claude$/i,
+  antigravity: /^(?:Google\.Antigravity|com\.google\.antigravity)$/i,
+};
+
 function knownAppId(id, value) {
-  if (typeof value !== "string") return false;
-  return id === "codex"
-    ? /^OpenAI\.Codex_[A-Za-z0-9]+![A-Za-z0-9._-]+$/i.test(value)
-    : /^Claude_[A-Za-z0-9]+!Claude$/i.test(value);
+  return typeof value === "string" && Boolean(APP_ID_PATTERNS[id]?.test(value));
 }
 
 function knownDesktopPath(id, value) {
@@ -68,6 +92,7 @@ function knownDesktopPath(id, value) {
     return /\\WindowsApps\\OpenAI\.Codex_[^\\]+\\app\\(?:ChatGPT|Codex)\.exe$/i.test(normalized)
       || /\\(?:OpenAI\\Codex|Programs\\Codex)\\(?:app-[\d.]+\\)?Codex\.exe$/i.test(normalized);
   }
+  if (id === "antigravity") return /\\Programs\\Antigravity\\Antigravity\.exe$/i.test(normalized);
   return /\\WindowsApps\\Claude_[^\\]+\\app\\Claude\.exe$/i.test(normalized)
     || /\\AnthropicClaude\\app-[\d.]+\\Claude\.exe$/i.test(normalized)
     || /\\Programs\\Claude\\Claude\.exe$/i.test(normalized);
@@ -109,7 +134,7 @@ export function createAppManager({
   }
 
   function requireId(id) {
-    if (!APP_IDS.includes(id)) throw new Error("Unknown app. Choose codex or claude.");
+    if (!APP_IDS.includes(id)) throw new Error(`Unknown app. Choose ${APP_IDS.join(", ")}.`);
   }
 
   function execute(script, extraEnv = {}) {

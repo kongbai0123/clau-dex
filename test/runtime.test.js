@@ -26,8 +26,8 @@ function createRuntime(scenario = "success", overrides = {}) {
   const captureFile = path.join(TEMP_ROOT, `capture-${sequence++}.jsonl`);
   const command = (agent, selectedScenario = scenario) => ({ command: process.execPath, args: [FIXTURE, agent, selectedScenario, captureFile] });
   const runtime = createAgentRuntime({
-    codexCommand: command("codex"), claudeCommand: command("claude"),
-    runtimeDirectory: path.join(TEMP_ROOT, "runtime"), ...overrides,
+    codexCommand: command("codex"), claudeCommand: command("claude"), antigravityCommand: command("antigravity"),
+    credentialExists: async () => true, runtimeDirectory: path.join(TEMP_ROOT, "runtime"), ...overrides,
   });
   return { runtime, captureFile, command, captures: () => existsSync(captureFile)
     ? readFileSync(captureFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [] };
@@ -172,13 +172,12 @@ test("aborting one status probe terminates its CLI processes while keeping runti
   const controller = new AbortController();
   const probing = runtime.probe({ signal: controller.signal });
   try {
-    await waitUntil(() => captures().length === 2);
+    await waitUntil(() => captures().length === 3);
     const probePids = captures().map((capture) => capture.pid);
-    assert.equal(runtime.activeProcesses().length, 2);
+    assert.equal(runtime.activeProcesses().length, 3);
     controller.abort();
     const status = await probing;
-    assert.equal(status.codex.error, "Status check cancelled.");
-    assert.equal(status.claude.error, "Status check cancelled.");
+    for (const agent of ["codex", "claude", "antigravity"]) assert.equal(status[agent].error, "Status check cancelled.");
     await waitUntil(() => probePids.every((pid) => !isAlive(pid)));
     assert.deepEqual(runtime.activeProcesses(), []);
     const result = await runtime.runClaude({ workspace: WORKSPACE, task: "Review a task after stopping the status probe.", mode: "review" });

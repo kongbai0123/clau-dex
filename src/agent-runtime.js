@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -6,8 +7,9 @@ import path from "node:path";
 import spawn from "cross-spawn";
 import { StringDecoder } from "node:string_decoder";
 import { normalizeEffort } from "./effort.js";
-import { AGENTS, MAX_REVISION_ROUNDS, PLAN_SCHEMA, QuotaPausedError, REVIEW_SCHEMA, acceptanceList, classifyFailure, describeCoordination, lenientPlan,
-  nextResumeAt, normalizeCoordinator, otherAgent, parseReview, pickAgent, validatePlan } from "./dispatch.js";
+import { AGENTS, COORDINATORS, MAX_REVISION_ROUNDS, QuotaPausedError, REVIEW_SCHEMA, acceptanceList, classifyFailure, coordinatorFor, describeCoordination,
+  fallbackExecutor, lenientPlan, nextResumeAt, normalizeCoordinator, normalizeParticipants, parseReview, pickAgent, planSchema, validatePlan } from "./dispatch.js";
+import { PROVIDERS, PROVIDER_IDS, providerName } from "./providers.js";
 import { diffTrees, snapshotTree } from "./checkpoints.js";
 import { buildCliEnvironment, resolveCliCommand } from "./cli-discovery.js";
 
@@ -170,7 +172,7 @@ function conversationMessages(value) {
   return value.map((message) => {
     const attachments = attachmentDescriptors(message?.attachments, "conversationContext attachments");
     if (!message || typeof message !== "object" || Array.isArray(message)
-      || !["user", "codex", "claude"].includes(message.role)
+      || !["user", ...PROVIDER_IDS].includes(message.role)
       || typeof message.content !== "string" || (!message.content.trim() && !attachments.length)
       || (attachments.length && message.role !== "user")) {
       throw new Error("Each conversationContext message requires role user, codex or claude and nonempty string content.");
@@ -265,13 +267,25 @@ export function codexUsage(events) {
   }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: null, turns: turns.length, models: [] });
 }
 
+/** Whether Windows Credential Manager lists a generic credential with this target. Only names are listed, never secrets. */
+function windowsCredentialExists(target) {
+  if (process.platform !== "win32") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    execFile("cmdkey.exe", [`/list:${target}`], { windowsHide: true, timeout: PROBE_TIMEOUT_MS, encoding: "utf8" }, (error, stdout) => {
+      if (error) { resolve(null); return; }
+      const lower = target.toLowerCase();
+      resolve(String(stdout).split(/\r?\n/).some((line) => line.toLowerCase().includes(`target=${lower}`) || line.trim().toLowerCase().endsWith(`: ${lower}`)));
+    });
+  });
+}
+
 /** A CLI supervisor shared by the desktop manager and the MCP adapter. */
 export function createAgentRuntime(options = {}) {
   const environment = buildCliEnvironment(options.env ?? process.env);
-  const commands = {
-    codex: commandDescriptor(options.codexCommand) ?? commandDescriptor(environment.AGENT_HUB_CODEX_COMMAND),
-    claude: commandDescriptor(options.claudeCommand) ?? commandDescriptor(environment.AGENT_HUB_CLAUDE_COMMAND),
-  };
+  // Explicit overrides: options.<id>Command, then AGENT_HUB_<ID>_COMMAND. Neither falls back to another install.
+  const commands = Object.fromEntries(PROVIDER_IDS.map((id) => [id,
+    commandDescriptor(options[`${id}Command`]) ?? commandDescriptor(environment[`AGENT_HUB_${id.toUpperCase()}_COMMAND`])]));
+  const credentialExists = typeof options.credentialExists === "function" ? options.credentialExists : windowsCredentialExists;
   const commandFor = agent => commands[agent] ?? resolveCliCommand(agent, { env: environment });
   const runtimeDirectory = path.resolve(options.runtimeDirectory ?? path.join(os.tmpdir(), "codex-claude-bridge-runtime"));
   const configuredTimeout = Number(options.timeoutMs ?? process.env.AGENT_HUB_TIMEOUT_MS);
@@ -418,13 +432,21 @@ export function createAgentRuntime(options = {}) {
   }
 
   async function probeAgent(agent, signal) {
+    if (!Object.hasOwn(PROVIDERS, agent)) throw new Error("Unknown CLI agent.");
+    const provider = PROVIDERS[agent];
     const status = { available: false, authenticated: false, version: null, error: null, commandPath: redact(commandFor(agent).command) };
     try {
       const version = await execute(agent, ["--version"], { limitMs: PROBE_TIMEOUT_MS, signal });
       if (version.exitCode !== 0) { status.error = "CLI version check failed."; return status; }
       status.available = true;
       status.version = `${agent} ${(`${version.stdout}\n${version.stderr}`).match(/\b\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?\b/)?.[0] ?? "unknown"}`;
-      const auth = await execute(agent, agent === "codex" ? ["login", "status"] : ["auth", "status", "--json"], {
+      if (!provider.status) {
+        // No status command: the sign-in entry the CLI keeps in Credential Manager is checked by name only.
+        status.authenticated = provider.credentialTarget ? await credentialExists(provider.credentialTarget) === true : false;
+        if (!status.authenticated) status.error = "Sign in to this CLI before assigning tasks.";
+        return status;
+      }
+      const auth = await execute(agent, provider.status, {
         limitMs: PROBE_TIMEOUT_MS, signal,
       });
       if (agent === "claude") {
@@ -444,8 +466,26 @@ export function createAgentRuntime(options = {}) {
   }
 
   async function probe({ signal } = {}) {
-    const [codex, claude] = await Promise.all([probeAgent("codex", signal), probeAgent("claude", signal)]);
-    return { codex, claude };
+    const results = await Promise.all(PROVIDER_IDS.map((id) => probeAgent(id, signal)));
+    return Object.fromEntries(PROVIDER_IDS.map((id, index) => [id, results[index]]));
+  }
+
+  /**
+   * Opens the CLI's own sign-in in a visible console. The CLI runs its browser authorization and keeps the
+   * credentials; Bridge reads none of its input or output and only watches for the console to close.
+   */
+  function login(agent) {
+    ensureOpen();
+    if (!Object.hasOwn(PROVIDERS, agent)) throw new Error("Unknown CLI agent.");
+    const descriptor = commandFor(agent);
+    return new Promise((resolve, reject) => {
+      const child = spawn(descriptor.command, [...descriptor.args, ...PROVIDERS[agent].login], {
+        cwd: os.homedir(), detached: true, windowsHide: false, stdio: "ignore", env: environment,
+      });
+      const exited = new Promise((done) => { child.once("exit", (code) => done(code)); child.once("error", () => done(null)); });
+      child.once("error", (error) => reject(new Error(error.code === "ENOENT" ? `${providerName(agent)} CLI is not installed or is not on PATH.` : redact(error.message))));
+      child.once("spawn", () => { child.unref(); resolve({ pid: child.pid, exited }); });
+    });
   }
 
   function quotaCollector(onProgress) {
@@ -591,7 +631,7 @@ export function createAgentRuntime(options = {}) {
 
   const getQuotas = typeof options.getQuotas === "function" ? options.getQuotas : () => ({});
   const retryDelayMs = Number.isFinite(options.retryDelayMs) && options.retryDelayMs >= 0 ? options.retryDelayMs : 20_000;
-  const AGENT_LABEL = { codex: "Codex", claude: "Claude" };
+  const AGENT_LABEL = Object.fromEntries(PROVIDER_IDS.map((id) => [id, providerName(id)]));
 
   function wait(milliseconds, signal) {
     return new Promise((resolve, reject) => {
@@ -623,7 +663,7 @@ export function createAgentRuntime(options = {}) {
       const workspace = workspaceDirectory(task.workspace);
       const mode = task.mode ?? "implement";
       const workflow = task.workflow ?? "coordinated";
-      if (!["review", "implement"].includes(mode) || !["coordinated", "codex", "claude"].includes(workflow)) throw new Error("Invalid task mode or workflow.");
+      if (!["review", "implement"].includes(mode) || !["coordinated", ...AGENTS].includes(workflow)) throw new Error("Invalid task mode or workflow.");
       const effort = normalizeEffort(task.effort);
       const messages = conversationMessages(task.conversationContext);
       const preparedImages = await prepareImages(task.attachments, messages);
@@ -632,33 +672,37 @@ export function createAgentRuntime(options = {}) {
       await mkdir(runtimeDirectory, { recursive: true });
       const safeId = String(task.id ?? randomUUID()).replace(/[^a-z0-9_-]/gi, "_").slice(0, 64);
       jobDirectory = await mkdtemp(path.join(runtimeDirectory, `job-${safeId}-`));
-      const forced = workflow === "coordinated" ? null : workflow;
+      // A coordinated run works only with the agents the user picked for this conversation.
+      const team = workflow === "coordinated" ? normalizeParticipants(task.dispatch?.participants ?? task.participants) : [workflow];
+      const forced = team.length === 1 ? team[0] : null;
       const tracksChanges = mode === "implement";
       const resumedRun = Boolean(task.dispatch);
       const notes = (Array.isArray(task.resumeNotes) ? task.resumeNotes : []).map((note) => String(note?.text || "").trim()).filter(Boolean);
       // When the user resumes a paused task with extra words, they travel with the original request.
       const userRequest = notes.length ? `${task.task}\n\n[使用者續作時補充]\n${notes.join("\n")}` : task.task;
 
-      const coordinator = normalizeCoordinator(task.dispatch?.coordinator ?? task.coordinator);
+      const coordinator = coordinatorFor(normalizeCoordinator(task.dispatch?.coordinator ?? task.coordinator), team);
       const dispatch = task.dispatch && typeof task.dispatch === "object" ? structuredClone(task.dispatch) : {
-        version: 2, phase: forced ? "execute" : "plan", forced, coordinator, plan: null,
+        version: 2, phase: forced ? "execute" : "plan", forced, coordinator, participants: team, plan: null,
         steps: forced ? [{ title: "處理需求", instruction: task.task, agent: forced, status: "pending" }] : [],
         exhausted: {}, handoffs: [], baseline: null, checkpoint: null, partial: null, round: 0, reviews: [], revisions: [], revision: null, rolesNote: "",
       };
       // Runs saved by the quota-ranked version: its verify phase is now the review phase.
       if (dispatch.phase === "verify") dispatch.phase = "review";
-      dispatch.coordinator = normalizeCoordinator(dispatch.coordinator ?? coordinator);
+      dispatch.participants = team;
+      dispatch.coordinator = coordinatorFor(normalizeCoordinator(dispatch.coordinator ?? coordinator), team);
       dispatch.round = Number.isInteger(dispatch.round) ? dispatch.round : 0;
       for (const key of ["reviews", "revisions", "handoffs"]) if (!Array.isArray(dispatch[key])) dispatch[key] = [];
       dispatch.exhausted ??= {};
       // A resumed run re-evaluates every limit: expired or unknown-until marks are cleared and re-tested.
-      for (const agent of AGENTS) {
+      for (const agent of team) {
         const hit = dispatch.exhausted?.[agent];
         if (hit && (!hit.until || Date.parse(hit.until) <= Date.now())) delete dispatch.exhausted[agent];
       }
       dispatch.pausedReason = null;
       const persist = () => emit(onProgress, { type: "dispatch", dispatch: structuredClone(dispatch) });
-      const pick = (preferred) => pickAgent({ preferred, forced, quotas: getQuotas() || {}, exhausted: dispatch.exhausted });
+      const pick = (preferred, role = "execute") => pickAgent({ preferred, forced, participants: team, role, quotas: getQuotas() || {}, exhausted: dispatch.exhausted });
+      const teamNames = team.map((agent) => AGENT_LABEL[agent]).join("、");
       if (tracksChanges && !dispatch.baseline) dispatch.baseline = await snapshotTree(workspace);
       persist();
 
@@ -694,19 +738,22 @@ export function createAgentRuntime(options = {}) {
         }
       };
       const pause = (reason) => {
-        const { states } = pick(dispatch.coordinator);
+        const { states } = pick(dispatch.coordinator, "coordinate");
         const relevant = forced ? { [forced]: states[forced] } : states;
         dispatch.pausedReason = reason;
         persist();
         throw new QuotaPausedError(reason, { dispatch: structuredClone(dispatch), resumeAt: nextResumeAt(relevant), stages: stages.map((stage) => ({ ...stage })) });
       };
-      /** Runs one role with its preferred agent; on quota exhaustion the role passes to the other agent, on a transient error it retries once. */
-      const withHandoff = async (preferred, label, operation) => {
+      /**
+       * Runs one role with its preferred agent; on quota exhaustion the role passes to the next participant that can
+       * take it (only coordinators plan and review), on a transient error it retries once.
+       */
+      const withHandoff = async (preferred, label, operation, role = "execute") => {
         let from = null; let retried = false;
         while (true) {
           ensureOpen(signal);
-          const { agent, states } = pick(preferred);
-          if (!agent) pause(`${forced ? AGENT_LABEL[forced] : "Codex 與 Claude"} 額度已用盡，${label}暫停${dispatch.lastLimitMessage ? `（${dispatch.lastLimitMessage}）` : ""}`);
+          const { agent, states } = pick(preferred, role);
+          if (!agent) pause(`${forced ? AGENT_LABEL[forced] : teamNames} 額度已用盡，${label}暫停${dispatch.lastLimitMessage ? `（${dispatch.lastLimitMessage}）` : ""}`);
           try { return { agent, value: await operation(agent, from, states) }; }
           catch (error) {
             const kind = classifyFailure(error);
@@ -740,7 +787,7 @@ export function createAgentRuntime(options = {}) {
       const acceptance = () => acceptanceList(dispatch.plan?.acceptance);
       const acceptanceText = () => acceptance().length ? acceptance().map((item, index) => `${index + 1}. ${item}`).join("\n") : "Fulfil the current user's request.";
       const base = (agent) => [
-        agent === "codex" ? "You are Codex, working on one part of a coordinated task." : "You are Claude, working on one part of a coordinated task.",
+        `You are ${AGENT_LABEL[agent]}, working on one part of a coordinated task.`,
         `Mode: ${mode}. Starting directory: ${workspace}`,
         mode === "review" ? "Work read-only. Do not change files." : "Use the tools needed for the user's requested operation, including file edits and shell commands when the request calls for them.",
         "The bridge runs the coordinated stages. Do not recursively invoke this same bridge from a provider session.",
@@ -750,7 +797,8 @@ export function createAgentRuntime(options = {}) {
        * Claude: the user's request in <current-user-request>, the role context before, its own work in <assignment>.
        * Codex: role context first, the user's request in <assignment>, its own work (step) after.
        */
-      const callAgent = (agent, { context, work, readOnly = false, schema, images = false }, outputDirectory) => agent === "claude"
+      const unsupported = (agent) => Promise.reject(new Error(`${AGENT_LABEL[agent] || agent} 目前還不能執行聊天室任務。`));
+      const callAgent = (agent, { context, work, readOnly = false, schema, images = false }, outputDirectory) => !AGENTS.includes(agent) ? unsupported(agent) : agent === "claude"
         ? runClaude({ workspace, task: work || context, context: work ? context : undefined, mode: readOnly ? "review" : mode, max_turns: task.max_turns, effort: effort.claude,
           currentRequest: userRequest, conversationContext: messages, ...(images ? { attachments: task.attachments } : {}) }, { onProgress, signal })
         : runCodex({ workspace, mode: readOnly ? "review" : mode, outputDirectory, schema, effort: effort.codex, images: images ? preparedImages.images : [],
@@ -767,21 +815,21 @@ export function createAgentRuntime(options = {}) {
           const prompt = [
             "You are the coordinator. The user is the client: they state what they need, and the team must deliver that result. Turn the user's current request into a plan the team can execute and check.",
             "acceptance: 1–6 concrete, checkable criteria derived from what the user asked for (including quality expectations a client would reasonably have). The finished work is reviewed against every criterion and returned for revision when one is not met.",
-            "steps: 1–4 sequential, self-contained steps. Use one step unless the request has clearly separable parts. Assign each step's agent to whoever suits that work better: \"codex\" (Codex) or \"claude\" (Claude Code). Prefer giving execution to the agent other than yourself, so the review stays independent, unless a step clearly suits you better.",
+            `steps: 1–4 sequential, self-contained steps. Use one step unless the request has clearly separable parts. Assign each step's agent to whoever suits that work better, choosing only from the agents the user picked for this conversation: ${team.map((id) => `"${id}" (${PROVIDERS[id].appName})`).join(", ")}. Prefer giving execution to an agent other than yourself, so the review stays independent, unless a step clearly suits you better.`,
             "kind: \"answer\" for questions or conversation, \"review\" for read-only inspection, \"change\" for requested modifications.",
             "Carry the current user's action and no-edit restrictions into every step. Do not turn a question, review or explicit do-not-edit request into an implementation task because editing capability is available.",
             "The summary is shown directly to the user as a chat message. Write a brief, plain-language Traditional Chinese update about how the team will deliver the result, without JSON or technical stage labels inside that string.",
             `You are ${AGENT_LABEL[agent]}.`,
-            agent === "claude" ? `Return only one JSON object: ${JSON.stringify({ summary: "…", kind: "change", steps: [{ title: "…", instruction: "…", agent: "codex" }], acceptance: ["…"] })}` : "Return only JSON matching the supplied schema.",
+            agent === "claude" ? `Return only one JSON object: ${JSON.stringify({ summary: "…", kind: "change", steps: [{ title: "…", instruction: "…", agent: fallbackExecutor(agent, team) }], acceptance: ["…"] })}` : "Return only JSON matching the supplied schema.",
             `Requested mode: ${mode}. Do not edit files, run the bridge MCP, or dispatch any workers during planning.`,
           ].join("\n\n");
           return stageRun(`${AGENT_LABEL[agent]} planning`, agent, async (outputDirectory) => {
-            const response = await callAgent(agent, { context: prompt, readOnly: true, images: true, schema: agent === "codex" ? PLAN_SCHEMA : undefined }, outputDirectory);
-            if (agent === "codex") { try { validatePlan(response.output, { coordinator: lead }); } catch (error) { error.output = response.output; throw error; } }
+            const response = await callAgent(agent, { context: prompt, readOnly: true, images: true, schema: agent === "codex" ? planSchema(team) : undefined }, outputDirectory);
+            if (agent === "codex") { try { validatePlan(response.output, { coordinator: lead, participants: team }); } catch (error) { error.output = response.output; throw error; } }
             return response;
-          }, { role: "planner", note: handoffNote(from, agent, "規劃") || describeCoordination(lead, states) });
-        });
-        dispatch.plan = agent === "codex" ? validatePlan(value, { coordinator: lead }) : lenientPlan(value, task.task, { coordinator: lead });
+          }, { role: "planner", note: handoffNote(from, agent, "規劃") || describeCoordination(lead, states, team) });
+        }, "coordinate");
+        dispatch.plan = agent === "codex" ? validatePlan(value, { coordinator: lead, participants: team }) : lenientPlan(value, task.task, { coordinator: lead, participants: team });
         dispatch.steps = dispatch.plan.steps.map((step) => ({ ...step, status: "pending" }));
         dispatch.phase = "execute";
         emit(onProgress, { type: "progress", message: dispatch.plan.summary, agent });
@@ -795,7 +843,7 @@ export function createAgentRuntime(options = {}) {
           const step = dispatch.steps[index];
           if (step.status === "done") continue;
           const label = total > 1 ? `步驟 ${index + 1}/${total}` : "執行";
-          const assigned = forced || (AGENTS.includes(step.agent) ? step.agent : otherAgent(dispatch.coordinator));
+          const assigned = forced || (team.includes(step.agent) ? step.agent : fallbackExecutor(dispatch.coordinator, team));
           const { agent, value } = await withHandoff(assigned, label, async (agent, from) => {
             const interrupted = from || (dispatch.partial?.step === index ? dispatch.partial.agent : null);
             dispatch.partial = { step: index, agent }; persist();
@@ -813,7 +861,7 @@ export function createAgentRuntime(options = {}) {
             ].filter(Boolean).join("\n\n");
             const name = forced ? `${AGENT_LABEL[agent]} task` : total === 1 ? `${AGENT_LABEL[agent]} assigned task` : `${AGENT_LABEL[agent]} step ${index + 1}/${total}`;
             return stageRun(name, agent, (outputDirectory) => direct
-              ? (agent === "claude"
+              ? (!AGENTS.includes(agent) ? unsupported(agent) : agent === "claude"
                 ? runClaude({ workspace, task: prompt, mode, max_turns: task.max_turns, conversationContext: messages, effort: effort.claude, attachments: task.attachments }, { onProgress, signal })
                 : runCodex({ workspace, mode, outputDirectory, effort: effort.codex, images: preparedImages.images, prompt: [...base("codex").slice(1), ...(historyPrompt ? [historyPrompt] : []), ...(imagePrompt ? [imagePrompt] : []),
                   "The assignment below is the current user's request, more recent than all supplied conversation history.", "<assignment>", prompt, "</assignment>"].join("\n\n") }, { onProgress, signal }))
@@ -837,7 +885,7 @@ export function createAgentRuntime(options = {}) {
         if (dispatch.phase === "revise") {
           // Each agent fixes the issues in the steps it executed; whole-result issues go to the last step's agent.
           const revision = dispatch.revision;
-          const ownerOf = (issue) => dispatch.steps[issue.step - 1]?.agent || dispatch.steps.at(-1)?.agent || otherAgent(dispatch.coordinator);
+          const ownerOf = (issue) => dispatch.steps[issue.step - 1]?.agent || dispatch.steps.at(-1)?.agent || fallbackExecutor(dispatch.coordinator, team);
           const owners = [...new Set(revision.issues.map(ownerOf))];
           revision.done = Array.isArray(revision.done) ? revision.done : [];
           for (const owner of owners) {
@@ -870,9 +918,10 @@ export function createAgentRuntime(options = {}) {
           persist();
           continue;
         }
-        // The coordinator reviews; when it executed everything itself, the other agent reviews instead.
+        // The coordinator reviews; when it executed everything itself, another participating coordinator reviews instead.
         const executors = new Set(dispatch.steps.map((step) => step.agent).filter(Boolean));
-        const reviewer = executors.size === 1 && executors.has(dispatch.coordinator) ? otherAgent(dispatch.coordinator) : dispatch.coordinator;
+        const independent = team.find((agent) => COORDINATORS.includes(agent) && agent !== dispatch.coordinator);
+        const reviewer = executors.size === 1 && executors.has(dispatch.coordinator) && independent ? independent : dispatch.coordinator;
         const roundsLeft = MAX_REVISION_ROUNDS - dispatch.round;
         let review;
         const { agent: reviewedBy, value } = await withHandoff(reviewer, "審查", async (agent, from) => {
@@ -901,8 +950,8 @@ export function createAgentRuntime(options = {}) {
             const shown = delivered ? review.reply : [`審查未通過，退回修正（第 ${dispatch.round + 1}/${MAX_REVISION_ROUNDS} 輪）：`,
               ...review.issues.map((issue, index) => `${index + 1}. ${issue.step ? `[步驟 ${issue.step}] ` : ""}${issue.problem}${issue.fix ? `\n   建議：${issue.fix}` : ""}`)].join("\n");
             return { ...response, output: shown };
-          }, { role: "reviewer", round: dispatch.round, note: handoffNote(from, agent, "審查") || (self ? "另一方無法使用，改為自我審查" : "") });
-        });
+          }, { role: "reviewer", round: dispatch.round, note: handoffNote(from, agent, "審查") || (self ? independent ? "另一方無法使用，改為自我審查" : "由統籌方審查自己的成果" : "") });
+        }, "coordinate");
         dispatch.reviews.push({ round: dispatch.round, agent: reviewedBy, verdict: review.verdict, criteria: review.criteria, issues: review.issues, ...(review.fallback ? { fallback: true } : {}) });
         if (review.verdict === "revise" && roundsLeft > 0) {
           dispatch.round += 1;
@@ -941,5 +990,5 @@ export function createAgentRuntime(options = {}) {
     return closing;
   }
 
-  return { probe, queryClaudeQuota, run, runClaude, close, activeProcesses };
+  return { probe, probeAgent, login, queryClaudeQuota, run, runClaude, close, activeProcesses };
 }

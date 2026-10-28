@@ -12,6 +12,6 @@ contextBridge.exposeInMainWorld("bridge", {
   createConversation: invoke("createConversation"), sendMessage: invoke("sendMessage"), resumeTask: invoke("resumeTask"),
   importImages: invoke("importImages"), deleteConversation: invoke("deleteConversation"),
   startBridge: invoke("startBridge"), stopBridge: invoke("stopBridge"),
-  launchApp: invoke("launchApp"), closeApp: invoke("closeApp"), updateSettings: invoke("updateSettings"),
+  loginAgent: invoke("loginAgent"), launchApp: invoke("launchApp"), closeApp: invoke("closeApp"), updateSettings: invoke("updateSettings"),
   onUpdate: listen("update"), onShutdown: listen("shutdown"),
 });

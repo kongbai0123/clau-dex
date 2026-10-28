@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { normalizeEffort } from "./effort.js";
-import { AGENTS, normalizeCoordinator } from "./dispatch.js";
+import { AGENTS, COORDINATORS, coordinatorFor, normalizeCoordinator, normalizeParticipants, validateParticipants } from "./dispatch.js";
+import { PROVIDER_IDS } from "./providers.js";
 import { normalizeAttachmentMetadata } from "./chat-attachments.js";
 
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -112,22 +113,26 @@ export function createTaskStore(dataDirectory, { inspectProcesses = inspectProce
     if (typeof input.task !== "string" || input.task.trim().length < minimumLength || input.task.length > 8000) {
       throw new Error(`請輸入 ${minimumLength} 到 8,000 字的${input.source === "chat" ? "訊息" : "任務內容"}。`);
     }
-    if (!["coordinated", "codex", "claude"].includes(input.workflow)) throw new Error("無效的協作方式。");
+    if (!["coordinated", ...AGENTS].includes(input.workflow)) throw new Error("無效的協作方式。");
     if (!["review", "implement"].includes(input.mode)) throw new Error("無效的任務模式。");
-    if (input.coordinator !== undefined && !AGENTS.includes(input.coordinator)) throw new Error("無效的統籌方。");
+    if (input.coordinator !== undefined && !COORDINATORS.includes(input.coordinator)) throw new Error("無效的統籌方。");
+    // Participants only apply to coordinated work; a single agent's workflow is that agent alone.
+    const participants = input.workflow === "coordinated"
+      ? (input.participants === undefined ? normalizeParticipants(undefined) : validateParticipants(input.participants)) : [input.workflow];
+    if (input.workflow === "coordinated" && participants.length < 2) throw new Error("協作至少需要兩個 AI；只選一個時請直接交給它處理。");
     if (input.conversationId !== undefined && (typeof input.conversationId !== "string" || !ID_PATTERN.test(input.conversationId))) throw new Error("無效的對話識別碼。");
     const attachments = normalizeAttachmentMetadata(input.attachments);
     if (input.userMessage !== undefined && (typeof input.userMessage !== "string" || input.userMessage.length > 8000
       || (!input.userMessage.trim() && !attachments.length))) throw new Error("無效的訊息內容。");
     const rawContext = input.conversationContext ?? [];
     const conversationContext = Array.isArray(rawContext) ? rawContext.map(message => {
-      if (!message || !["user", "codex", "claude"].includes(message.role) || typeof message.content !== "string") return null;
+      if (!message || !["user", ...PROVIDER_IDS].includes(message.role) || typeof message.content !== "string") return null;
       const images = normalizeAttachmentMetadata(message.attachments);
       if ((images.length && message.role !== "user") || (!message.content.trim() && !images.length)) return null;
       return { role: message.role, content: message.content, ...(images.length ? { attachments: images } : {}) };
     }) : rawContext;
     if (!Array.isArray(conversationContext) || conversationContext.some(message => !message
-      || !["user", "codex", "claude"].includes(message.role) || typeof message.content !== "string")
+      || !["user", ...PROVIDER_IDS].includes(message.role) || typeof message.content !== "string")
       || conversationContext.reduce((length, message) => length + message.content.length, 0) > 16000) {
       throw new Error("無效的對話內容；前文最多 16,000 字。");
     }
@@ -137,7 +142,7 @@ export function createTaskStore(dataDirectory, { inspectProcesses = inspectProce
     const now = new Date().toISOString();
     const task = {
       id: randomUUID(), title: String(input.title || input.task.trim().split(/\r?\n/)[0]).slice(0, 100),
-      task: input.task.trim(), workspace, workflow: input.workflow, mode: input.mode, effort, coordinator: normalizeCoordinator(input.coordinator),
+      task: input.task.trim(), workspace, workflow: input.workflow, participants, mode: input.mode, effort, coordinator: coordinatorFor(normalizeCoordinator(input.coordinator), participants),
       max_turns: input.max_turns, source: input.source || "desktop", ownerId: input.ownerId,
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
       conversationContext,

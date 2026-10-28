@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { resolveGitWorkspace } from "./task-store.js";
 import { normalizeEffort } from "./effort.js";
-import { AGENTS, normalizeCoordinator } from "./dispatch.js";
+import { AGENTS, AGENT_NAMES, COORDINATORS, coordinatorFor, normalizeCoordinator, normalizeParticipants, validateParticipants, workflowFor } from "./dispatch.js";
+import { PROVIDER_IDS } from "./providers.js";
 import { attachmentPreview, MAX_CHAT_IMAGES, MAX_CHAT_IMAGE_TOTAL_BYTES, normalizeAttachmentMetadata } from "./chat-attachments.js";
 
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const STATUSES = new Set(["completed", "running", "queued", "failed", "cancelled", "interrupted", "paused", "handoff"]);
-const WORKFLOWS = ["coordinated", "codex", "claude"];
+const WORKFLOWS = ["coordinated", ...AGENTS];
 const MODES = ["review", "implement"];
 const MAX_CONTEXT_CHARACTERS = 16000;
 
@@ -23,12 +24,19 @@ function atomicWrite(file, value) {
   }
 }
 
-function validatePreferences({ workspace, workflow, mode, effort, coordinator }) {
+function validatePreferences({ workspace, workflow, participants, mode, effort, coordinator }) {
   if (workspace !== undefined && typeof workspace !== "string") throw new Error("無效的專案路徑。");
   if (workflow !== undefined && !WORKFLOWS.includes(workflow)) throw new Error("無效的協作方式。");
+  if (participants !== undefined) validateParticipants(participants);
   if (mode !== undefined && !MODES.includes(mode)) throw new Error("無效的任務模式。");
   if (effort !== undefined) normalizeEffort(effort);
-  if (coordinator !== undefined && !AGENTS.includes(coordinator)) throw new Error("無效的統籌方。");
+  if (coordinator !== undefined && !COORDINATORS.includes(coordinator)) throw new Error("無效的統籌方。");
+}
+/** The participants a request asks for: an explicit list wins, then a single-agent or coordinated workflow, then the room's. */
+function requestedTeam(input, room = {}) {
+  if (input.participants !== undefined) return validateParticipants(input.participants);
+  if (input.workflow !== undefined) return normalizeParticipants(undefined, input.workflow);
+  return normalizeParticipants(room.participants, room.workflow);
 }
 
 // Older rooms and tasks predate effort settings; unknown stored values fall back to CLI defaults.
@@ -41,7 +49,7 @@ function chronological(tasks) {
 function activeAgent(task) {
   const stages = Array.isArray(task.stages) ? task.stages : [];
   const currentStage = stages.findLast(stage => stage.status === "running") || stages.at(-1);
-  return ["codex", "claude"].includes(currentStage?.agent) ? currentStage.agent : task.workflow === "claude" ? "claude" : "codex";
+  return PROVIDER_IDS.includes(currentStage?.agent) ? currentStage.agent : AGENTS.includes(task.workflow) ? task.workflow : "codex";
 }
 function failureReason(value) {
   if (typeof value !== "string" || !value.trim()) return "";
@@ -65,15 +73,15 @@ function failureReason(value) {
 }
 function placeholder(status, role, error) {
   if (status === "queued") return "等待回覆…";
-  if (status === "running") return `${role === "claude" ? "Claude" : "Codex"} 正在處理訊息…`;
+  if (status === "running") return `${AGENT_NAMES[role] || "Codex"} 正在處理訊息…`;
   if (status === "failed") {
     const reason = failureReason(error);
     return `此次回覆未能完成。${reason ? `\n原因：${reason}` : "可以調整訊息後再試一次。"}`;
   }
   if (status === "cancelled") return "此次執行已停止。已產生的內容與修改會保留。";
   if (status === "interrupted") return "上次執行中斷。請檢查專案現況後再傳送訊息。";
-  if (status === "handoff") return `${role === "claude" ? "Claude" : "Codex"} 額度用盡，已把這部分交給另一方接手。`;
-  if (status === "paused") return "兩邊額度都已用盡，已保存進度並暫停。額度恢復後，按「接續完成」或在這裡傳送訊息，就會從中斷處繼續。";
+  if (status === "handoff") return `${AGENT_NAMES[role] || "Codex"} 額度用盡，已把這部分交給另一方接手。`;
+  if (status === "paused") return "可用的 AI 額度都已用盡，已保存進度並暫停。額度恢復後，按「接續完成」或在這裡傳送訊息，就會從中斷處繼續。";
   return "此次執行已結束。";
 }
 function planText(output) {
@@ -104,7 +112,7 @@ function taskMessages(task) {
     createdAt: task.createdAt, taskId: task.id, substantive: true }];
   const stages = Array.isArray(task.stages) ? task.stages : [];
   for (const [index, stage] of stages.entries()) {
-    const role = ["codex", "claude"].includes(stage.agent) ? stage.agent : activeAgent(task);
+    const role = PROVIDER_IDS.includes(stage.agent) ? stage.agent : activeAgent(task);
     const reportedStatus = STATUSES.has(stage.status) ? stage.status : taskStatus;
     const status = TERMINAL.has(taskStatus) && ["running", "queued"].includes(reportedStatus) ? taskStatus : reportedStatus;
     let content = typeof stage.output === "string" ? stage.output.trim() : "";
@@ -120,8 +128,8 @@ function taskMessages(task) {
   }
   const finalOutput = typeof task.output === "string" ? task.output.trim() : "";
   // Whoever finished the last stage (usually the reviewer delivering the result) gives the final reply.
-  const lastCompleted = stages.findLast(stage => stage.status === "completed" && ["codex", "claude"].includes(stage.agent));
-  const finalRole = lastCompleted?.agent || (task.workflow === "claude" ? "claude" : "codex");
+  const lastCompleted = stages.findLast(stage => stage.status === "completed" && PROVIDER_IDS.includes(stage.agent));
+  const finalRole = lastCompleted?.agent || (AGENTS.includes(task.workflow) ? task.workflow : "codex");
   const lastAssistant = messages.findLast(message => message.role !== "user") || null;
   if (finalOutput && !(lastAssistant?.role === finalRole && lastAssistant.content.trim() === finalOutput)) {
     messages.push({ id: `${task.id}:reply`, role: finalRole, content: finalOutput, status: taskStatus,
@@ -184,10 +192,12 @@ export function createConversationStore(dataDirectory) {
     const first = roomTasks(id, tasks)[0];
     if (!first) return null;
     return { id, title: String(first.title || first.task || "歷史對話").slice(0, 100), workspace: first.workspace || "",
-      workflow: WORKFLOWS.includes(first.workflow) ? first.workflow : "coordinated", mode: MODES.includes(first.mode) ? first.mode : "review",
+      workflow: WORKFLOWS.includes(first.workflow) ? first.workflow : "coordinated", participants: normalizeParticipants(first.participants, first.workflow), mode: MODES.includes(first.mode) ? first.mode : "review",
       effort: storedEffort(first.effort), coordinator: normalizeCoordinator(first.coordinator), createdAt: first.createdAt, updatedAt: first.updatedAt || first.createdAt };
   }
-  function project(room, tasks) {
+  function project(saved, tasks) {
+    // Rooms saved before participants existed derive them from their workflow.
+    const room = { ...saved, participants: normalizeParticipants(saved.participants, saved.workflow) };
     const related = roomTasks(room.id, tasks);
     const active = related.find(task => !TERMINAL.has(task.status));
     const updatedAt = [room.updatedAt, ...related.map(task => task.updatedAt || task.createdAt)].filter(Boolean).sort().at(-1) || room.createdAt;
@@ -207,8 +217,9 @@ export function createConversationStore(dataDirectory) {
   function create(input = {}) {
     validatePreferences(input);
     const now = new Date().toISOString();
-    const room = { id: randomUUID(), title: "新的對話", workspace: input.workspace || "", workflow: input.workflow || "coordinated",
-      mode: input.mode || "implement", effort: normalizeEffort(input.effort), coordinator: normalizeCoordinator(input.coordinator), createdAt: now, updatedAt: now };
+    const participants = requestedTeam(input);
+    const room = { id: randomUUID(), title: "新的對話", workspace: input.workspace || "", workflow: workflowFor(participants), participants,
+      mode: input.mode || "implement", effort: normalizeEffort(input.effort), coordinator: coordinatorFor(normalizeCoordinator(input.coordinator), participants), createdAt: now, updatedAt: now };
     atomicWrite(roomPath(room.id), room);
     return project(room, []);
   }
@@ -221,20 +232,21 @@ export function createConversationStore(dataDirectory) {
     const related = roomTasks(room.id, tasks);
     if (related.some(task => !TERMINAL.has(task.status))) throw new Error("這個對話仍在處理上一則訊息，請等待回覆或停止執行。");
     const workspace = resolveGitWorkspace(input.workspace ?? room.workspace);
-    const workflow = input.workflow ?? room.workflow;
+    const participants = requestedTeam(input, room);
+    const workflow = workflowFor(participants);
     // Normal chat lets the agent choose whether to answer, inspect or edit.
     // A historical review turn does not constrain a new message's permissions.
     const mode = input.mode ?? "implement";
     const effort = normalizeEffort(input.effort ?? storedEffort(room.effort));
-    const coordinator = normalizeCoordinator(input.coordinator ?? room.coordinator);
+    const coordinator = coordinatorFor(normalizeCoordinator(input.coordinator ?? room.coordinator), participants);
     const message = input.message.trim();
-    return { room: { ...room, workspace, workflow, mode, effort, coordinator }, taskInput: { task: message || "請查看附上的圖片。", userMessage: message,
-      attachments, workspace, workflow, mode, effort, coordinator, source: "chat",
+    return { room: { ...room, workspace, workflow, participants, mode, effort, coordinator }, taskInput: { task: message || "請查看附上的圖片。", userMessage: message,
+      attachments, workspace, workflow, participants, mode, effort, coordinator, source: "chat",
       conversationId: room.id, conversationContext: contextFromTasks(related) } };
   }
   function recordSubmission(room, task) {
     const relatedTitle = room.title === "新的對話" ? String(task.task).split(/\r?\n/)[0].slice(0, 100) : room.title;
-    const next = { id: room.id, title: relatedTitle, workspace: task.workspace, workflow: task.workflow, mode: task.mode,
+    const next = { id: room.id, title: relatedTitle, workspace: task.workspace, workflow: task.workflow, participants: normalizeParticipants(task.participants, task.workflow), mode: task.mode,
       effort: storedEffort(task.effort), coordinator: normalizeCoordinator(task.coordinator), createdAt: room.createdAt, updatedAt: task.createdAt };
     atomicWrite(roomPath(room.id), next);
     return next;

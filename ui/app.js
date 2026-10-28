@@ -5,7 +5,13 @@ const $$ = (selector, scope = document) => [...scope.querySelectorAll(selector)]
 const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 const VIEW_LABELS = { workspace: "聊天室", apps: "App 管理", history: "對話紀錄", settings: "設定" };
-const WORKFLOW_LABELS = { coordinated: "協作", codex: "Codex", claude: "Claude" };
+// Mirrors src/providers.js until the first snapshot arrives with the live list.
+const DEFAULT_PROVIDERS = [
+  { id: "codex", name: "Codex", appName: "Codex", coordinate: true, tasks: true },
+  { id: "claude", name: "Claude", appName: "Claude Code", coordinate: true, tasks: true },
+  { id: "antigravity", name: "Antigravity", appName: "Antigravity", coordinate: false, tasks: false },
+];
+const APP_SUBTITLES = { codex: "Codex 桌面應用程式", claude: "Claude Code 應用程式／終端機", antigravity: "Google Antigravity 桌面 App／agy CLI" };
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const MAX_IMAGES = 8;
@@ -20,12 +26,31 @@ function effortOf(value) {
   for (const agent of Object.keys(EFFORT_LEVELS)) if (EFFORT_LEVELS[agent].includes(value?.[agent])) effort[agent] = value[agent];
   return effort;
 }
-function coordinatorOf(value) { return value === "claude" ? "claude" : "codex"; }
-function workflowAgents(workflow) { return workflow === "coordinated" ? ["codex", "claude"] : [workflow]; }
+function providers() { return Array.isArray(state?.snapshot?.providers) && state.snapshot.providers.length ? state.snapshot.providers : DEFAULT_PROVIDERS; }
+function taskAgents() { return providers().filter((provider) => provider.tasks).map((provider) => provider.id); }
+function coordinators() { return providers().filter((provider) => provider.coordinate).map((provider) => provider.id); }
+function agentName(id) { return providers().find((provider) => provider.id === id)?.name || "Codex"; }
+function appName(id) { return providers().find((provider) => provider.id === id)?.appName || agentName(id); }
+/** The AI picked for a room; rooms saved before multi-select only stored a workflow. */
+function participantsOf(value, workflow = "coordinated") {
+  const chosen = Array.isArray(value) ? taskAgents().filter((agent) => value.includes(agent)) : [];
+  if (chosen.length) return chosen;
+  return taskAgents().includes(workflow) ? [workflow] : coordinators().filter((agent) => taskAgents().includes(agent));
+}
+function workflowOf(participants) { return participants.length === 1 ? participants[0] : "coordinated"; }
+function coordinatorOf(value, participants = coordinators()) {
+  const candidates = participants.filter((agent) => coordinators().includes(agent));
+  return candidates.includes(value) ? value : candidates[0] || "codex";
+}
+function teamLabel(participants) { return participants.length === 1 ? agentName(participants[0]) : "協作"; }
+function roomOptions(room) {
+  const participants = participantsOf(room?.participants, room?.workflow || "coordinated");
+  return { workspace: room?.workspace || "", participants, effort: effortOf(room?.effort), coordinator: coordinatorOf(room?.coordinator, participants) };
+}
 const state = {
   snapshot: { agents: {}, bridge: { state: "starting", tools: [] }, apps: {}, tasks: [], conversations: [], settings: { workspace: "", closeLaunchedApps: false }, shuttingDown: false },
   loaded: false, view: "workspace", selectedConversationId: null,
-  options: { workspace: "", workflow: "coordinated", effort: effortOf(), coordinator: "codex" }, optionDirty: false,
+  options: { workspace: "", participants: ["codex", "claude"], effort: effortOf(), coordinator: "codex" }, optionDirty: false,
   drafts: new Map(), busy: new Set(), error: null, apiError: null, toastTimer: null,
   settingsWorkspaceDirty: false, composing: false, forceScroll: false,
   renderedRoom: undefined, renderedMessages: "",
@@ -37,7 +62,8 @@ const state = {
 function conversation() { return (state.snapshot.conversations || []).find((room) => room.id === state.selectedConversationId) || null; }
 function roomsByRecency() { return [...(state.snapshot.conversations || [])].sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)); }
 function rolePreview() {
-  if (state.options.workflow !== "coordinated") return "";
+  const team = state.options.participants;
+  if (team.length < 2) return "";
   const usage = state.snapshot.usage || {};
   const remaining = (quota) => {
     let left = null;
@@ -49,13 +75,13 @@ function rolePreview() {
     }
     return left;
   };
-  const left = { codex: remaining(usage.codex?.quota), claude: remaining(usage.claude?.quota) };
-  const lead = coordinatorOf(state.options.coordinator); const other = lead === "codex" ? "claude" : "codex";
-  const name = (agent) => agent === "codex" ? "Codex" : "Claude";
-  if (left[lead] === 0 && left[other] === 0) return "兩邊額度都已用盡";
-  if (left[lead] === 0) return `${name(lead)} 額度已用盡，改由 ${name(other)} 統籌`;
-  if (left[other] === 0) return `${name(lead)} 統籌並執行`;
-  return `${name(lead)} 統籌審查`;
+  const left = Object.fromEntries(team.map((agent) => [agent, remaining(usage[agent]?.quota)]));
+  const lead = coordinatorOf(state.options.coordinator, team); const others = team.filter((agent) => agent !== lead);
+  const usable = others.filter((agent) => left[agent] !== 0);
+  if (left[lead] === 0 && !usable.length) return "所有 AI 額度都已用盡";
+  if (left[lead] === 0) { const next = usable.find((agent) => coordinators().includes(agent)); return next ? `${agentName(lead)} 額度已用盡，改由 ${agentName(next)} 統籌` : `${agentName(lead)} 額度已用盡`; }
+  if (!usable.length) return `${agentName(lead)} 統籌並執行`;
+  return `${agentName(lead)} 統籌審查`;
 }
 /** Shown above the composer while the room's task waits for quota; resuming is always the user's call. */
 function renderPauseBanner() {
@@ -146,6 +172,7 @@ function errorMessage(error) { return String(typeof error === "string" ? error :
 function statusBadge(label, type = "ready") { return `<span class="status-badge ${type}"><span class="status-dot ${type === "ready" ? "" : type}"></span>${escapeHtml(label)}</span>`; }
 function agentStatus(agent = {}) {
   if (!state.loaded || state.apiError) return { text: "狀態待確認", type: "muted" };
+  if (agent.login?.state === "pending") return { text: "等待瀏覽器授權…", type: "warning" };
   if (!agent.available) return { text: "CLI 不可用", type: "muted" };
   if (agent.authenticated === false) return { text: "需要登入", type: "warning" };
   if (agent.authenticated === true) return { text: "CLI 已登入", type: "ready" };
@@ -173,17 +200,26 @@ function loadDraft() { $("#task-description").value = state.drafts.get(state.sel
 function selectConversation(id) {
   const room = (state.snapshot.conversations || []).find((candidate) => candidate.id === id);
   if (!room) return;
-  saveDraft(); state.selectedConversationId = id; state.options = { workspace: room.workspace || "", workflow: room.workflow || "coordinated", effort: effortOf(room.effort), coordinator: coordinatorOf(room.coordinator) }; state.optionDirty = false; state.error = null; state.forceScroll = true;
+  saveDraft(); state.selectedConversationId = id; state.options = roomOptions(room); state.optionDirty = false; state.error = null; state.forceScroll = true;
   loadDraft(); syncOptionControls(); render(); setView("workspace"); $("#task-description").focus();
 }
 function resizeComposer() { const textarea = $("#task-description"); textarea.style.height = "auto"; textarea.style.height = `${Math.max(45, Math.min(150, textarea.scrollHeight))}px`; }
 function syncOptionControls() {
   $("#task-workspace").value = state.options.workspace;
-  $$("[data-workflow]").forEach((button) => { const selected = button.dataset.workflow === state.options.workflow; button.classList.toggle("selected", selected); button.setAttribute("aria-pressed", String(selected)); });
-  $$("[data-coordinator]").forEach((button) => { const selected = button.dataset.coordinator === coordinatorOf(state.options.coordinator); button.classList.toggle("selected", selected); button.setAttribute("aria-pressed", String(selected)); });
-  $("#coordinator-field").hidden = state.options.workflow !== "coordinated";
-  $("#workflow-description").textContent = state.options.workflow === "coordinated" ? "統籌方把你的需求整理成驗收標準、依任務性質指派 Codex 或 Claude 執行，再逐條審查；未達標就退回修正（最多 2 輪），最後交付結果。額度只在一方用完時才交接。" : state.options.workflow === "codex" ? "由 Codex 回覆與處理這則訊息。" : "由 Claude Code 回覆與處理這則訊息。";
-  const agents = workflowAgents(state.options.workflow);
+  const team = state.options.participants; const lead = coordinatorOf(state.options.coordinator, team);
+  const locked = Boolean(activeTaskId() || state.busy.has("send-message") || state.snapshot.shuttingDown);
+  $("#participant-chips").innerHTML = providers().map((provider) => {
+    const selected = team.includes(provider.id); const agent = state.snapshot.agents?.[provider.id] || {}; const status = agentStatus(agent);
+    const unsupported = !provider.tasks;
+    const title = unsupported ? `${provider.appName} 目前只能在 App 管理查看狀態與登入，還不能接聊天室任務` : `${provider.appName} · ${status.text}${selected && team.length === 1 ? "（至少保留一個 AI）" : ""}`;
+    return `<button type="button" class="participant-chip ${provider.id}${selected ? " selected" : ""}" data-participant="${escapeHtml(provider.id)}" aria-pressed="${selected}" title="${escapeHtml(title)}" ${unsupported || locked ? "disabled" : ""}>${icon(selected ? "check" : provider.id)}<span>${escapeHtml(provider.name)}</span>${unsupported ? '<small>即將支援</small>' : `<i class="status-dot ${status.type === "ready" ? "" : status.type}" aria-hidden="true"></i>`}</button>`;
+  }).join("");
+  const leads = team.filter((agent) => coordinators().includes(agent));
+  $("#coordinator-options").innerHTML = leads.map((agent) => `<button class="segment${agent === lead ? " selected" : ""}" type="button" data-coordinator="${escapeHtml(agent)}" aria-pressed="${agent === lead}" ${locked ? "disabled" : ""}>${escapeHtml(agentName(agent))}</button>`).join("");
+  $("#coordinator-field").hidden = team.length < 2 || leads.length < 2;
+  const helpers = team.filter((agent) => agent !== lead).map(agentName).join("、");
+  $("#workflow-description").textContent = team.length === 1 ? `由 ${appName(team[0])} 回覆與處理這則訊息。` : `${agentName(lead)} 統籌：把需求整理成驗收標準，依任務性質指派 ${team.map(agentName).join("、")} 執行，再逐條審查；未達標就退回修正（最多 2 輪），最後交付結果。${helpers ? `額度用完時，由 ${helpers} 接手。` : ""}`;
+  const agents = team;
   for (const agent of Object.keys(EFFORT_LEVELS)) {
     const levels = EFFORT_LEVELS[agent]; const level = state.options.effort[agent]; const index = Math.max(0, levels.indexOf(level));
     const slider = $(`#effort-${agent}`); slider.value = String(index); slider.style.setProperty("--fill", `${(index / (levels.length - 1)) * 100}%`);
@@ -193,23 +229,23 @@ function syncOptionControls() {
   }
 }
 function effortSummary() {
-  return workflowAgents(state.options.workflow).filter((agent) => state.options.effort[agent] !== "auto")
-    .map((agent) => `${agent === "codex" ? "Codex" : "Claude"} ${EFFORT_SHORT[state.options.effort[agent]]}`).join(" · ");
+  return state.options.participants.filter((agent) => EFFORT_LEVELS[agent] && state.options.effort[agent] !== "auto")
+    .map((agent) => `${agentName(agent)} ${EFFORT_SHORT[state.options.effort[agent]]}`).join(" · ");
 }
 function messageHtml(message) {
   const role = message.role;
-  const name = role === "user" ? "你" : role === "codex" ? "Codex" : "Claude";
+  const name = role === "user" ? "你" : agentName(role);
   const content = String(message.content || "");
   const images = Array.isArray(message.attachments) ? message.attachments : [];
   const active = ACTIVE_STATUSES.has(message.status);
   const failure = ["failed", "cancelled", "interrupted"].includes(message.status);
   const statusText = message.status === "handoff" ? "已交接" : message.status === "paused" ? "已暫停" : message.status === "queued" ? "等待回覆" : message.status === "running" ? "正在回覆" : message.status === "cancelled" ? "已停止" : message.status === "interrupted" ? "已中斷" : message.status === "failed" ? "回覆未完成" : "";
   const formatted = escapeHtml(content).replace(/```(?:[\w-]+)?\n([\s\S]*?)```/g, "<pre>$1</pre>").replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  return `<article class="message" data-message-role="${role}" data-message-id="${escapeHtml(message.id)}"><div class="message-avatar">${icon(role === "claude" ? "claude" : "codex")}</div><div class="message-main"><div class="message-heading"><span class="message-name">${name}</span>${statusText ? `<span class="message-state ${failure ? "error" : ""}">${statusText}</span>` : ""}${content && role !== "user" ? `<button class="icon-button message-copy" data-copy-message="${escapeHtml(message.id)}" title="複製 ${name} 的回覆" aria-label="複製 ${name} 的回覆">${icon("copy")}</button>` : ""}</div>${message.note ? `<p class="message-note">${icon("link")}${escapeHtml(message.note)}</p>` : ""}${images.length ? `<div class="message-images" aria-label="訊息中的圖片">${imageMarkup(images)}</div>` : ""}${content ? `<div class="message-content">${formatted}</div>` : images.length ? "" : active ? '<div class="typing-dots" aria-label="正在等待回覆"><span></span><span></span><span></span></div>' : '<p class="message-no-content">這則回覆沒有內容。</p>'}</div></article>`;
+  return `<article class="message" data-message-role="${role}" data-message-id="${escapeHtml(message.id)}"><div class="message-avatar">${icon(role === "user" ? "codex" : role)}</div><div class="message-main"><div class="message-heading"><span class="message-name">${name}</span>${statusText ? `<span class="message-state ${failure ? "error" : ""}">${statusText}</span>` : ""}${content && role !== "user" ? `<button class="icon-button message-copy" data-copy-message="${escapeHtml(message.id)}" title="複製 ${name} 的回覆" aria-label="複製 ${name} 的回覆">${icon("copy")}</button>` : ""}</div>${message.note ? `<p class="message-note">${icon("link")}${escapeHtml(message.note)}</p>` : ""}${images.length ? `<div class="message-images" aria-label="訊息中的圖片">${imageMarkup(images)}</div>` : ""}${content ? `<div class="message-content">${formatted}</div>` : images.length ? "" : active ? '<div class="typing-dots" aria-label="正在等待回覆"><span></span><span></span><span></span></div>' : '<p class="message-no-content">這則回覆沒有內容。</p>'}</div></article>`;
 }
 function renderChat() {
   const room = conversation();
-  const messages = (room?.messages || []).filter((message) => ["user", "codex", "claude"].includes(message.role));
+  const messages = (room?.messages || []).filter((message) => message.role === "user" || providers().some((provider) => provider.id === message.role));
   $("#conversation-title").textContent = room?.title || "新對話";
   const signature = JSON.stringify(messages.map((message) => [message.id, message.role, message.status, message.content, (Array.isArray(message.attachments) ? message.attachments : []).map((image) => [image.id, image.name, image.previewUrl])]));
   if (state.renderedRoom === state.selectedConversationId && state.renderedMessages === signature && !state.forceScroll) return;
@@ -227,7 +263,7 @@ function renderHistory() {
   $("#history-count").textContent = String(rooms.length);
   $("#recent-conversations").innerHTML = rooms.length ? rooms.slice(0, 8).map((room) => `<div class="recent-room-row ${room.id === state.selectedConversationId ? "selected" : ""}"><button class="recent-room" data-conversation-id="${escapeHtml(room.id)}" title="${escapeHtml(room.title || "新對話")}">${escapeHtml(room.title || "新對話")}</button><button type="button" class="icon-button room-delete" data-delete-conversation-id="${escapeHtml(room.id)}" aria-label="刪除 ${escapeHtml(room.title || "新對話")}" title="刪除對話">${icon("trash")}</button></div>`).join("") : '<p class="recent-empty">開始對話後，<br>會在這裡找到紀錄。</p>';
   const filtered = rooms.filter((room) => !query || `${room.title || ""} ${(room.messages || []).map((message) => message.content || "").join(" ")}`.toLocaleLowerCase().includes(query));
-  $("#history-list").innerHTML = filtered.length ? filtered.map((room) => `<div class="history-item"><button type="button" class="history-select" data-conversation-id="${escapeHtml(room.id)}">${icon("chat")}<span class="history-body"><span class="history-title">${escapeHtml(room.title || "新對話")}</span><span class="history-meta"><span>${dateLabel(room.updatedAt || room.createdAt)}</span><span>${room.messages?.length || 0} 則訊息</span><span>${escapeHtml(WORKFLOW_LABELS[room.workflow] || "協作")}</span></span></span>${icon("arrow")}</button><button type="button" class="icon-button room-delete" data-delete-conversation-id="${escapeHtml(room.id)}" aria-label="刪除 ${escapeHtml(room.title || "新對話")}" title="刪除對話">${icon("trash")}</button></div>`).join("") : `<div class="history-empty">${icon("history")}<h2>${rooms.length ? "沒有符合的對話" : "每段對話，都會留在這裡"}</h2><p>${rooms.length ? "試試其他關鍵字。" : "開始與 Codex、Claude 對話，之後就能回到這裡。"}</p>${!rooms.length ? '<button class="button secondary" data-new-conversation>開始新對話</button>' : ""}</div>`;
+  $("#history-list").innerHTML = filtered.length ? filtered.map((room) => `<div class="history-item"><button type="button" class="history-select" data-conversation-id="${escapeHtml(room.id)}">${icon("chat")}<span class="history-body"><span class="history-title">${escapeHtml(room.title || "新對話")}</span><span class="history-meta"><span>${dateLabel(room.updatedAt || room.createdAt)}</span><span>${room.messages?.length || 0} 則訊息</span><span>${escapeHtml(teamLabel(participantsOf(room.participants, room.workflow || "coordinated")))}</span></span></span>${icon("arrow")}</button><button type="button" class="icon-button room-delete" data-delete-conversation-id="${escapeHtml(room.id)}" aria-label="刪除 ${escapeHtml(room.title || "新對話")}" title="刪除對話">${icon("trash")}</button></div>`).join("") : `<div class="history-empty">${icon("history")}<h2>${rooms.length ? "沒有符合的對話" : "每段對話，都會留在這裡"}</h2><p>${rooms.length ? "試試其他關鍵字。" : "開始與 Codex、Claude 對話，之後就能回到這裡。"}</p>${!rooms.length ? '<button class="button secondary" data-new-conversation>開始新對話</button>' : ""}</div>`;
 }
 function bridgeInfo() {
   const bridge = state.snapshot.bridge || {};
@@ -242,17 +278,24 @@ function renderBridge() {
   $("#sidebar-status").textContent = info.label; $("#sidebar-status").title = info.description; $("#sidebar-dot").className = `status-dot ${info.type === "ready" ? "" : info.type}`;
   $("#app-bridge-detail").innerHTML = `<div class="app-service-content"><div><div class="service-status-line"><span class="status-dot ${info.type === "ready" ? "" : info.type}"></span>${escapeHtml(info.label)}${bridge.pid ? `<span class="status-badge muted">PID ${escapeHtml(bridge.pid)}</span>` : ""}</div><p class="service-description">${escapeHtml(info.description)}</p><p class="service-description">關閉視窗時，橋接服務與執行中的 CLI 任務會同步停止。</p></div>${info.action ? `<button class="button ${info.action === "stop" ? "secondary" : "primary"}" data-bridge-action="${info.action}" ${busy || state.snapshot.shuttingDown ? "disabled" : ""}>${icon(info.action === "stop" ? "stop" : "play")}${busy ? "處理中…" : info.action === "stop" ? "停止橋接" : "啟動橋接"}</button>` : ""}</div>${Array.isArray(bridge.tools) && bridge.tools.length ? `<div class="service-tools">${bridge.tools.map((tool) => `<span class="service-tool">${escapeHtml(typeof tool === "string" ? tool : tool.name || "MCP tool")}</span>`).join("")}</div>` : ""}${bridge.error ? `<p class="inline-error">${escapeHtml(bridge.error)}</p>` : ""}`;
 }
+/** Sign-in goes through the CLI's own console and browser authorization; Bridge only watches for the result. */
+function loginControl(key, agent, compact = false) {
+  if (!state.loaded || !agent.available) return "";
+  const pending = agent.login?.state === "pending"; const busy = state.busy.has(`login-${key}`);
+  if (agent.authenticated !== false && !pending) return "";
+  return `<button class="button ${compact ? "secondary small" : "primary"}" data-login-agent="${escapeHtml(key)}" ${busy || pending || state.snapshot.shuttingDown ? "disabled" : ""}>${icon("link")}${pending ? "等待授權…" : busy ? "開啟中…" : `登入 ${escapeHtml(appName(key))}`}</button>`;
+}
 function renderApps() {
-  $("#app-cards").innerHTML = ["codex", "claude"].map((key) => {
-    const app = state.snapshot.apps?.[key] || {}; const agent = state.snapshot.agents?.[key] || {}; const busy = state.busy.has(`app-${key}`); const name = key === "codex" ? "Codex" : "Claude Code";
+  $("#app-cards").innerHTML = providers().map(({ id: key }) => {
+    const app = state.snapshot.apps?.[key] || {}; const agent = state.snapshot.agents?.[key] || {}; const busy = state.busy.has(`app-${key}`); const name = appName(key);
     const pids = Array.isArray(app.pids) ? app.pids : []; const ownership = app.managed ? "由工作台啟動" : app.running ? "在工作台外啟動" : "尚未啟動";
-    return `<article class="app-card"><div class="app-card-header"><div class="agent-avatar ${key}">${icon(key)}</div><div><h2 class="app-title">${name}</h2><p class="app-subtitle">${key === "codex" ? "Codex 桌面應用程式" : "Claude Code 應用程式／終端機"}</p></div>${statusBadge(!state.loaded ? "檢查中" : app.running ? "執行中" : app.installed ? "已停止" : "未偵測到", app.running ? "ready" : "muted")}</div><div class="app-data"><span>安裝狀態</span><strong>${!state.loaded ? "正在檢查" : app.installed ? "已找到啟動程式" : "尚未找到啟動程式"}</strong></div><div class="app-data"><span>程序管理</span><strong>${ownership}</strong></div><div class="app-data"><span>程序編號</span><code>${pids.length ? escapeHtml(pids.join(", ")) : "—"}</code></div><div class="app-data"><span>任務 CLI</span><strong>${escapeHtml(agentStatus(agent).text)}</strong></div>${agent.version ? `<div class="app-data"><span>CLI 版本</span><code>${escapeHtml(agent.version)}</code></div>` : ""}<div class="app-card-footer"><button class="button primary" data-launch-app="${key}" ${busy || !app.installed || state.snapshot.shuttingDown ? "disabled" : ""}>${icon("play")}${busy ? "處理中…" : app.running ? "開啟 App" : "啟動 App"}</button><button class="button secondary" data-close-app="${key}" ${busy || !app.managed || !app.running || state.snapshot.shuttingDown ? "disabled" : ""} title="${app.managed ? "關閉由工作台啟動的 App" : "只能關閉由工作台啟動的 App"}">${icon("close")}關閉 App</button></div><p class="app-hint">${app.managed ? "這個 App 由工作台啟動，可以在此關閉。" : app.running ? "此 App 由其他地方啟動；可在它自己的視窗中關閉。" : "開啟 App 不會自動開始聊天室任務。"}</p>${app.error || agent.error ? `<p class="inline-error">${escapeHtml(app.error || agent.error)}</p>` : ""}</article>`;
+    return `<article class="app-card"><div class="app-card-header"><div class="agent-avatar ${key}">${icon(key)}</div><div><h2 class="app-title">${name}</h2><p class="app-subtitle">${escapeHtml(APP_SUBTITLES[key] || `${name} 桌面應用程式`)}</p></div>${statusBadge(!state.loaded ? "檢查中" : app.running ? "執行中" : app.installed ? "已停止" : "未偵測到", app.running ? "ready" : "muted")}</div><div class="app-card-body"><div class="app-data"><span>安裝狀態</span><strong>${!state.loaded ? "正在檢查" : app.installed ? "已找到啟動程式" : "尚未找到啟動程式"}</strong></div><div class="app-data"><span>程序管理</span><strong>${ownership}</strong></div><div class="app-data"><span>程序編號</span><code>${pids.length ? escapeHtml(pids.join(", ")) : "—"}</code></div><div class="app-data"><span>任務 CLI</span><strong>${escapeHtml(agentStatus(agent).text)}</strong></div>${agent.version ? `<div class="app-data"><span>CLI 版本</span><code>${escapeHtml(agent.version)}</code></div>` : ""}</div><div class="app-card-footer"><button class="button primary" data-launch-app="${key}" ${busy || !app.installed || state.snapshot.shuttingDown ? "disabled" : ""}>${icon("play")}${busy ? "處理中…" : app.running ? "開啟 App" : "啟動 App"}</button><button class="button secondary" data-close-app="${key}" ${busy || !app.managed || !app.running || state.snapshot.shuttingDown ? "disabled" : ""} title="${app.managed ? "關閉由工作台啟動的 App" : "只能關閉由工作台啟動的 App"}">${icon("close")}關閉 App</button>${loginControl(key, agent)}</div><p class="app-hint">${agent.login?.state === "pending" ? "已開啟登入視窗：請在瀏覽器完成授權，完成後這裡會自動更新。" : app.managed ? "這個 App 由工作台啟動，可以在此關閉。" : app.running ? "此 App 由其他地方啟動；可在它自己的視窗中關閉。" : "開啟 App 不會自動開始聊天室任務。"}${key === "antigravity" && state.loaded && !agent.available ? " 聊天室任務需要 agy CLI；目前尚未偵測到，可先在 Antigravity App 內登入 Google 帳號。" : ""}</p>${agent.login?.state === "failed" ? `<p class="inline-error">${escapeHtml(agent.login.message)}</p>` : app.error || (agent.error && !(key === "antigravity" && !agent.available)) ? `<p class="inline-error">${escapeHtml(app.error || agent.error)}</p>` : ""}</article>`;
   }).join("");
 }
 function renderComposer() {
   const activeId = activeTaskId(); const pending = state.busy.has("send-message"); const key = currentDraftKey(); const uploading = state.uploadingImages.has(key);
   renderDraftImages();
-  const keys = state.options.workflow === "coordinated" ? ["codex", "claude"] : [state.options.workflow];
+  const keys = state.options.participants;
   const checking = keys.filter((key) => { const agent = state.snapshot.agents?.[key]; return !agent?.available && agent?.error === "正在檢查連線"; });
   const missing = keys.filter((key) => !state.snapshot.agents?.[key]?.available && !checking.includes(key)); const login = keys.filter((key) => state.snapshot.agents?.[key]?.authenticated === false);
   const blocked = !state.loaded || state.apiError || state.snapshot.bridge?.state !== "running" || checking.length || missing.length || login.length;
@@ -261,18 +304,22 @@ function renderComposer() {
   cancel.disabled = Boolean(state.busy.has(`cancel-${activeId}`) || state.snapshot.shuttingDown);
   $("#task-workspace").readOnly = Boolean(pending || activeId); $("#select-workspace").disabled = Boolean(pending || !state.loaded || state.busy.has("select-workspace") || activeId || state.snapshot.shuttingDown);
   $("#attach-images").disabled = Boolean(!state.loaded || pending || uploading || state.snapshot.shuttingDown);
-  $$("[data-workflow],[data-coordinator],[data-effort-agent]").forEach((button) => { button.disabled = Boolean(activeId || pending || state.snapshot.shuttingDown); });
+  $$("[data-coordinator],[data-effort-agent]").forEach((button) => { button.disabled = Boolean(activeId || pending || state.snapshot.shuttingDown); });
+  $$("[data-participant]").forEach((button) => { button.disabled = Boolean(activeId || pending || state.snapshot.shuttingDown || !taskAgents().includes(button.dataset.participant)); });
   $("#task-description").disabled = Boolean(pending || state.snapshot.shuttingDown);
   $("#workspace-lock-hint").textContent = "未指定時使用預設資料夾；每則訊息都可以重新選擇。";
   const projectName = state.options.workspace.split(/[\\/]/).filter(Boolean).at(-1);
   $("#composer-context-label").textContent = projectName || "工作資料夾（選填）"; $("#composer-context-label").title = state.options.workspace || "未指定時使用預設工作資料夾";
   const effortText = effortSummary();
   const roles = rolePreview();
-  $("#composer-mode-label").textContent = `${WORKFLOW_LABELS[state.options.workflow] || "協作"}${roles ? ` · ${roles}` : ""}${effortText ? ` · ${effortText}` : ""}`;
-  $("#task-description").placeholder = state.options.workflow === "coordinated" ? "傳送訊息給 Codex 與 Claude…" : `傳送訊息給 ${state.options.workflow === "codex" ? "Codex" : "Claude"}…`;
-  const agentNames = (agentKeys) => agentKeys.map((key) => key === "codex" ? "Codex" : "Claude").join("、");
+  $("#composer-mode-label").textContent = `${state.options.participants.length > 1 ? `協作（${state.options.participants.map(agentName).join("＋")}）` : teamLabel(state.options.participants)}${roles ? ` · ${roles}` : ""}${effortText ? ` · ${effortText}` : ""}`;
+  $("#task-description").placeholder = `傳送訊息給 ${state.options.participants.map(agentName).join(" 與 ")}…`;
+  const agentNames = (agentKeys) => agentKeys.map(agentName).join("、");
   const gateError = state.apiError ? "無法連接管理服務，請重新開啟工作台。" : state.loaded && state.snapshot.bridge?.state !== "running" ? "管理服務尚未啟動，請到 App 管理啟動橋接。" : state.loaded && checking.length ? `正在檢查 ${agentNames(checking)} CLI 狀態，完成後即可傳送…` : state.loaded && missing.length ? `${agentNames(missing)} CLI 尚不可用，請到 App 管理查看狀態。` : state.loaded && login.length ? `${agentNames(login)} 尚未登入，請先完成登入。` : null;
-  const error = state.error || state.imageErrors.get(key) || gateError; $("#composer-error").hidden = !error; $("#composer-error").textContent = error || "";
+  const error = state.error || state.imageErrors.get(key) || gateError; $("#composer-error").hidden = !error;
+  // A sign-in gate offers the sign-in right where it blocks sending.
+  const loginButtons = !state.error && !state.imageErrors.get(key) && error === gateError && login.length ? login.map((agent) => loginControl(agent, state.snapshot.agents?.[agent] || {}, true)).join("") : "";
+  $("#composer-error").innerHTML = `${escapeHtml(error || "")}${loginButtons ? `<span class="composer-error-actions">${loginButtons}</span>` : ""}`;
   $$("#new-conversation,[data-new-conversation]").forEach((button) => { button.disabled = !state.loaded || state.busy.has("new-room") || pending || uploading || state.snapshot.shuttingDown; });
   $("#refresh-status").disabled = !state.loaded || state.busy.has("refresh") || state.snapshot.shuttingDown; $("#refresh-status").classList.toggle("busy", state.busy.has("refresh"));
   $("#select-settings-workspace").disabled = !state.loaded || state.busy.has("select-settings-workspace") || state.snapshot.shuttingDown;
@@ -286,7 +333,7 @@ const INSPECTOR_TABS = ["usage", "conversation", "system"];
 /** "Claude step 2/3 #2" → "Claude 步驟 2/3（續）": stage names carry agent and role. */
 function stageLabel(name) {
   const text = String(name || ""); const repeated = / #\d+$/.test(text); const base = text.replace(/ #\d+$/, "");
-  const agent = /^Claude/.test(base) ? "Claude" : /^Codex/.test(base) ? "Codex" : "";
+  const agent = providers().find((provider) => base.startsWith(provider.name))?.name || "";
   const step = base.match(/step (\d+)\/(\d+)/); const revision = base.match(/revision (\d+)/); const review = base.match(/review(?: (\d+))?$/);
   const role = /planning/.test(base) ? "規劃" : /assigned task/.test(base) ? "執行" : step ? `步驟 ${step[1]}/${step[2]}` : revision ? `修正 ${revision[1]}`
     : review ? `審查${review[1] ? ` ${review[1]}` : ""}` : /integration/.test(base) ? "驗收" : / task$/.test(base) ? "回覆" : "";
@@ -294,9 +341,9 @@ function stageLabel(name) {
 }
 const STATUS_LABELS = { queued: "等待中", running: "執行中", completed: "完成", failed: "失敗", cancelled: "已停止", interrupted: "已中斷" };
 // Agent identity colors (validated for color-vision deficiency on the white surface).
-const AGENT_COLORS = { codex: "#3f7cb4", claude: "#d0824f" };
-const AGENT_SHADES = { codex: ["#a7c3df", "#3f7cb4", "#1f4c78"], claude: ["#edc3a6", "#d0824f", "#8f4d26"] };
-const AGENT_NAMES = { codex: "Codex", claude: "Claude" };
+const AGENT_COLORS = { codex: "#3f7cb4", claude: "#d0824f", antigravity: "#2f9488" };
+const AGENT_SHADES = { codex: ["#a7c3df", "#3f7cb4", "#1f4c78"], claude: ["#edc3a6", "#d0824f", "#8f4d26"], antigravity: ["#a3d4cd", "#2f9488", "#1b5b53"] };
+const AGENT_NAMES = new Proxy({}, { get: (_target, id) => agentName(String(id)) });
 const SEVERITY = { good: { color: "#5f9a3c", label: "充足" }, warning: { color: "#d9a21b", label: "偏低" }, critical: { color: "#d03b3b", label: "快用完" } };
 const OUTCOME_COLORS = { completed: "#5f9a3c", running: "#8fa0b3", queued: "#c3ccd6", failed: "#d03b3b", cancelled: "#b3b8ad", interrupted: "#b3b8ad" };
 function loadInspector() {
@@ -533,16 +580,18 @@ function conversationTabHtml() {
   const active = tasks.find((task) => ACTIVE_STATUSES.has(task.status) || task.status === "paused");
   const stages = tasks.flatMap((task) => task.stages || []);
   const totalMs = tasks.reduce((sum, task) => sum + (task.startedAt ? Math.max(0, elapsed(task.startedAt, task.finishedAt || null)) : 0), 0);
-  const totals = { codex: sumStages(stages, "codex"), claude: sumStages(stages, "claude") };
+  const team = participantsOf(room.participants, room.workflow || "coordinated");
+  const shown = taskAgents();
+  const totals = Object.fromEntries(shown.map((agent) => [agent, sumStages(stages, agent)]));
   const agentTotal = (agent) => totals[agent].inputTokens + totals[agent].outputTokens;
-  const allTokens = agentTotal("codex") + agentTotal("claude");
+  const allTokens = shown.reduce((sum, agent) => sum + agentTotal(agent), 0);
   const effort = effortOf(room.effort);
-  const settings = `<div class="ins-chips"><span>${escapeHtml(WORKFLOW_LABELS[room.workflow] || "協作")}</span>${(room.workflow || "coordinated") === "coordinated" ? `<span>${AGENT_NAMES[coordinatorOf(room.coordinator)]} 統籌</span>` : ""}${workflowAgents(room.workflow || "coordinated").map((agent) => `<span>${AGENT_NAMES[agent]} ${escapeHtml(EFFORT_LABELS[effort[agent]])}</span>`).join("")}<span>${tasks.length} 則訊息</span></div>`;
-  const agentLegend = legend(["codex", "claude"].map((agent) => ({ color: AGENT_COLORS[agent], label: AGENT_NAMES[agent] })));
+  const settings = `<div class="ins-chips"><span>${escapeHtml(teamLabel(team))}</span>${team.length > 1 ? `<span>${AGENT_NAMES[coordinatorOf(room.coordinator, team)]} 統籌</span>` : ""}${team.map((agent) => `<span>${AGENT_NAMES[agent]}${EFFORT_LEVELS[agent] ? ` ${escapeHtml(EFFORT_LABELS[effort[agent]])}` : ""}</span>`).join("")}<span>${tasks.length} 則訊息</span></div>`;
+  const agentLegend = legend(shown.map((agent) => ({ color: AGENT_COLORS[agent], label: AGENT_NAMES[agent] })));
   const recent = tasks.slice(-8);
   const live = active ? zone("live", "clock", "執行狀態", active.status === "paused" ? "額度用盡，已暫停；等你接續" : active.progress || "執行中", stageProgress(active), active.status === "paused" ? "已暫停" : active.startedAt ? `<span data-since="${escapeHtml(active.startedAt)}">${formatDuration(elapsed(active.startedAt))}</span>` : "排隊中") : "";
-  const max = Math.max(1, agentTotal("codex"), agentTotal("claude"));
-  const agentRows = ["codex", "claude"].map((agent) => meterRow({ agent, name: AGENT_NAMES[agent], value: formatTokens(agentTotal(agent)), percent: (agentTotal(agent) / max) * 100, color: AGENT_COLORS[agent],
+  const max = Math.max(1, ...shown.map(agentTotal));
+  const agentRows = shown.map((agent) => meterRow({ agent, name: AGENT_NAMES[agent], value: formatTokens(agentTotal(agent)), percent: (agentTotal(agent) / max) * 100, color: AGENT_COLORS[agent],
     meta: `<span>輸入 ${formatTokens(totals[agent].inputTokens)} · 輸出 <strong>${formatTokens(totals[agent].outputTokens)}</strong>${agent === "claude" && totals.claude.hasCost ? ` · 約 ${money(totals.claude.costUsd)}` : ""}</span>`,
     tip: [`${formatTokens(agentTotal(agent))} tokens`, `${AGENT_NAMES[agent]} · ${totals[agent].runs} 次執行`] })).join("");
   const tokens = zone("tokens", "chat", "Token 消耗", "這段對話用了多少 tokens", agentRows + (recent.length ? `<h4 class="ins-subhead">每則訊息</h4>${agentLegend}${timelineChart(recent, "tokens")}` : ""), `${escapeHtml(formatTokens(allTokens))}<small> tokens</small>`);
@@ -550,7 +599,7 @@ function conversationTabHtml() {
   return settings + live + tokens + time;
 }
 function systemTabHtml() {
-  const agents = ["codex", "claude"].map((key) => {
+  const agents = providers().map(({ id: key }) => {
     const agent = state.snapshot.agents?.[key] || {}; const status = agentStatus(agent); const app = state.snapshot.apps?.[key] || {};
     return `<div class="ins-agent-row"><span class="ins-agent"><i style="background:${AGENT_COLORS[key]}"></i>${AGENT_NAMES[key]}</span>${statusBadge(status.text, status.type)}</div><p class="ins-tokens">${agent.version ? `<code>${escapeHtml(agent.version)}</code> · ` : ""}App ${app.running ? "執行中" : app.installed ? "未執行" : "未偵測到"}</p>${agent.commandPath ? `<p class="ins-tokens" style="overflow-wrap:anywhere">CLI：<code>${escapeHtml(agent.commandPath)}</code></p>` : ""}${agent.error ? `<p class="inline-error">${escapeHtml(agent.error)}</p>` : ""}`;
   }).join("");
@@ -599,7 +648,7 @@ setInterval(() => {
 }, 1000);
 function render() { renderChat(); renderHistory(); renderBridge(); renderApps(); renderComposer(); renderInspector(); }
 function resetToBlankDraft() {
-  state.selectedConversationId = null; state.options = { workspace: state.snapshot.settings?.workspace || "", workflow: "coordinated", effort: effortOf(), coordinator: coordinatorOf(state.options.coordinator) }; state.optionDirty = false; state.error = null; state.forceScroll = true;
+  state.selectedConversationId = null; state.options = { ...roomOptions(null), workspace: state.snapshot.settings?.workspace || "", participants: state.options.participants, coordinator: coordinatorOf(state.options.coordinator, state.options.participants) }; state.optionDirty = false; state.error = null; state.forceScroll = true;
   state.drafts.set("new", ""); state.imageDrafts.delete("new"); state.imageErrors.delete("new"); state.imageGenerations.set("new", (state.imageGenerations.get("new") || 0) + 1); loadDraft();
 }
 function applySnapshot(snapshot) {
@@ -610,7 +659,7 @@ function applySnapshot(snapshot) {
   previousRooms.forEach((room) => { if (!remainingIds.has(room.id)) { state.deletedRooms.add(room.id); state.drafts.delete(room.id); state.imageDrafts.delete(room.id); state.imageErrors.delete(room.id); } });
   const room = conversation();
   if (state.selectedConversationId && !room) resetToBlankDraft();
-  if (!state.optionDirty) { state.options = { workspace: room?.workspace || state.snapshot.settings?.workspace || "", workflow: room?.workflow || "coordinated", effort: room ? effortOf(room.effort) : state.options.effort, coordinator: room ? coordinatorOf(room.coordinator) : coordinatorOf(state.options.coordinator) }; }
+  if (!state.optionDirty) state.options = room ? roomOptions(room) : { ...state.options, workspace: state.snapshot.settings?.workspace || "", participants: participantsOf(state.options.participants), coordinator: coordinatorOf(state.options.coordinator, participantsOf(state.options.participants)) };
   syncOptionControls();
   if (!state.settingsWorkspaceDirty) $("#settings-workspace").value = state.snapshot.settings?.workspace || "";
   $("#close-launched-apps").checked = Boolean(state.snapshot.settings?.closeLaunchedApps);
@@ -628,10 +677,10 @@ async function newConversation() {
   if (state.busy.has("new-room") || state.busy.has("send-message") || state.uploadingImages.has(currentDraftKey()) || !state.loaded || state.snapshot.shuttingDown) return;
   saveDraft();
   const result = await action("new-room", async () => {
-    const effort = effortOf(state.options.effort); const coordinator = coordinatorOf(state.options.coordinator);
-    const created = await invoke("createConversation", { workspace: state.snapshot.settings?.workspace || "", workflow: "coordinated", effort, coordinator });
+    const effort = effortOf(state.options.effort); const participants = state.options.participants; const coordinator = coordinatorOf(state.options.coordinator, participants);
+    const created = await invoke("createConversation", { workspace: state.snapshot.settings?.workspace || "", participants, effort, coordinator });
     const room = created?.conversation || created; if (!room?.id) throw new Error("無法建立新對話，請稍後重試。");
-    state.selectedConversationId = room.id; state.options = { workspace: room.workspace || "", workflow: room.workflow || "coordinated", effort: effortOf(room.effort ?? effort), coordinator: coordinatorOf(room.coordinator ?? coordinator) }; state.optionDirty = false; state.error = null; state.forceScroll = true;
+    state.selectedConversationId = room.id; state.options = roomOptions({ ...room, participants: room.participants ?? participants, effort: room.effort ?? effort, coordinator: room.coordinator ?? coordinator }); state.optionDirty = false; state.error = null; state.forceScroll = true;
     state.drafts.set(room.id, ""); loadDraft(); applySnapshot(await invoke("getSnapshot")); return room;
   });
   if (result) { $("#chat-options").open = false; setView("workspace"); $("#task-description").focus(); }
@@ -645,7 +694,8 @@ async function sendMessage() {
   state.busy.add("send-message"); state.error = null; state.forceScroll = true; renderComposer();
   try {
     const workspace = state.options.workspace.trim();
-    const options = { ...(workspace ? { workspace } : {}), workflow: state.options.workflow, effort: effortOf(state.options.effort), coordinator: coordinatorOf(state.options.coordinator) };
+    const participants = state.options.participants;
+    const options = { ...(workspace ? { workspace } : {}), participants, effort: effortOf(state.options.effort), coordinator: coordinatorOf(state.options.coordinator, participants) };
     if (!sendingRoomId) { const created = await invoke("createConversation", options); const room = created?.conversation || created; if (!room?.id) throw new Error("無法建立對話，請稍後重試。"); sendingRoomId = room.id; if (state.selectedConversationId === null) state.selectedConversationId = sendingRoomId; }
     await invoke("sendMessage", { conversationId: sendingRoomId, message, attachmentIds: images.map((image) => image.id), ...options });
     state.drafts.set(sendingRoomId, ""); state.drafts.set(originalDraftKey, "");
@@ -697,14 +747,21 @@ document.addEventListener("click", async (event) => {
   const view = event.target.closest("[data-view]"); if (view) { event.preventDefault(); setView(view.dataset.view, true); return; }
   if (event.target.closest("#new-conversation,[data-new-conversation]")) { await newConversation(); return; }
   const room = event.target.closest("[data-conversation-id]"); if (room) { selectConversation(room.dataset.conversationId); return; }
-  const coordinator = event.target.closest("[data-coordinator]"); if (coordinator && !coordinator.disabled) { state.options.coordinator = coordinatorOf(coordinator.dataset.coordinator); state.optionDirty = true; state.error = null; syncOptionControls(); renderComposer(); return; }
-  const workflow = event.target.closest("[data-workflow]"); if (workflow && !workflow.disabled) { state.options.workflow = workflow.dataset.workflow; state.optionDirty = true; state.error = null; syncOptionControls(); renderComposer(); return; }
+  const coordinator = event.target.closest("[data-coordinator]"); if (coordinator && !coordinator.disabled) { state.options.coordinator = coordinatorOf(coordinator.dataset.coordinator, state.options.participants); state.optionDirty = true; state.error = null; syncOptionControls(); renderComposer(); return; }
+  const participant = event.target.closest("[data-participant]"); if (participant && !participant.disabled) {
+    const id = participant.dataset.participant; const team = state.options.participants;
+    if (team.includes(id) && team.length === 1) { showToast("至少要保留一個 AI。", true); return; }
+    const next = team.includes(id) ? team.filter((agent) => agent !== id) : taskAgents().filter((agent) => team.includes(agent) || agent === id);
+    if (next.length > 1 && !next.some((agent) => coordinators().includes(agent))) { showToast("多個 AI 協作時，至少要選擇 Codex 或 Claude 擔任統籌。", true); return; }
+    state.options.participants = next; state.options.coordinator = coordinatorOf(state.options.coordinator, next); state.optionDirty = true; state.error = null; syncOptionControls(); renderComposer(); return;
+  }
+  const loginButton = event.target.closest("[data-login-agent]"); if (loginButton && !loginButton.disabled) { const key = loginButton.dataset.loginAgent; await action(`login-${key}`, async () => { const result = await invoke("loginAgent", key); applySnapshot(await invoke("getSnapshot")); return result; }, `已開啟 ${appName(key)} 登入視窗，請在瀏覽器完成授權`); return; }
   const resumeButton = event.target.closest("[data-resume-task]"); if (resumeButton && !resumeButton.disabled) { const id = resumeButton.dataset.resumeTask; await action(`resume-${id}`, async () => { const result = await invoke("resumeTask", id); applySnapshot(await invoke("getSnapshot")); return result; }, "已接續，正在從中斷處繼續"); return; }
   const cancel = event.target.closest("[data-cancel-task]"); if (cancel && !cancel.disabled) { const id = cancel.dataset.cancelTask; await action(`cancel-${id}`, async () => { const result = await invoke("cancelTask", id); applySnapshot(await invoke("getSnapshot")); return result; }); return; }
   const copy = event.target.closest("[data-copy-message]"); if (copy) { const message = conversation()?.messages?.find((candidate) => candidate.id === copy.dataset.copyMessage); try { if (!navigator.clipboard?.writeText) throw new Error("請選取文字並使用 Ctrl + C 複製。"); await navigator.clipboard.writeText(message?.content || ""); showToast("回覆已複製"); } catch (error) { showToast(errorMessage(error), true); } return; }
   const bridge = event.target.closest("[data-bridge-action]"); if (bridge && !bridge.disabled) { const start = bridge.dataset.bridgeAction === "start"; await action("bridge", async () => { const result = await invoke(start ? "startBridge" : "stopBridge"); applySnapshot(await invoke("getSnapshot")); return result; }, start ? "MCP 橋接已啟動" : "MCP 橋接已停止"); return; }
-  const launch = event.target.closest("[data-launch-app]"); if (launch && !launch.disabled) { const key = launch.dataset.launchApp; await action(`app-${key}`, async () => { const result = await invoke("launchApp", key); applySnapshot(await invoke("getSnapshot")); return result; }, `${key === "codex" ? "Codex" : "Claude Code"} 已開啟`); return; }
-  const close = event.target.closest("[data-close-app]"); if (close && !close.disabled) { const key = close.dataset.closeApp; await action(`app-${key}`, async () => { const result = await invoke("closeApp", key); applySnapshot(await invoke("getSnapshot")); return result; }, `${key === "codex" ? "Codex" : "Claude Code"} 已關閉`); return; }
+  const launch = event.target.closest("[data-launch-app]"); if (launch && !launch.disabled) { const key = launch.dataset.launchApp; await action(`app-${key}`, async () => { const result = await invoke("launchApp", key); applySnapshot(await invoke("getSnapshot")); return result; }, `${appName(key)} 已開啟`); return; }
+  const close = event.target.closest("[data-close-app]"); if (close && !close.disabled) { const key = close.dataset.closeApp; await action(`app-${key}`, async () => { const result = await invoke("closeApp", key); applySnapshot(await invoke("getSnapshot")); return result; }, `${appName(key)} 已關閉`); return; }
   if (event.target.closest("#toggle-inspector")) { setInspector({ open: !state.inspector.open }); return; }
   if (event.target.closest("[data-close-inspector]")) { setInspector({ open: false }); $("#toggle-inspector").focus(); return; }
   const inspectorTab = event.target.closest("[data-inspector-tab]"); if (inspectorTab) { setInspector({ tab: inspectorTab.dataset.inspectorTab }); return; }

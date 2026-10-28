@@ -3,8 +3,12 @@
 // those criteria and returned for revision until it passes or the revision rounds run out.
 // Quota never decides the roles; it only hands a role to the other agent when one actually runs out.
 
-export const AGENTS = ["codex", "claude"];
-export const AGENT_NAMES = { codex: "Codex", claude: "Claude" };
+import { COORDINATORS, PROVIDERS, TASK_AGENTS, providerName } from "./providers.js";
+
+/** Agents that can take chat tasks; COORDINATORS can also plan and review. */
+export const AGENTS = TASK_AGENTS;
+export { COORDINATORS };
+export const AGENT_NAMES = Object.fromEntries(Object.keys(PROVIDERS).map((id) => [id, providerName(id)]));
 export const DEFAULT_COORDINATOR = "codex";
 export const MAX_REVISION_ROUNDS = 2;
 const UNKNOWN_REMAINING = 50;
@@ -12,7 +16,41 @@ const RECHECK_MS = 30 * 60 * 1000;
 
 export function otherAgent(agent) { return agent === "codex" ? "claude" : "codex"; }
 /** Older rooms and tasks have no coordinator; unknown values fall back to the default. */
-export function normalizeCoordinator(value) { return AGENTS.includes(value) ? value : DEFAULT_COORDINATOR; }
+export function normalizeCoordinator(value) { return COORDINATORS.includes(value) ? value : DEFAULT_COORDINATOR; }
+
+/**
+ * The agents taking part in a conversation, in registry order. Older rooms and tasks only stored a workflow:
+ * "coordinated" meant both coordinators, and a single agent's workflow meant that agent alone.
+ */
+export function normalizeParticipants(value, workflow = "coordinated") {
+  if (Array.isArray(value)) {
+    const chosen = AGENTS.filter((agent) => value.includes(agent));
+    if (chosen.length) return chosen;
+  }
+  return AGENTS.includes(workflow) ? [workflow] : [...COORDINATORS];
+}
+/** Throws for a participant list the user cannot run: unknown agents, none, or a team without a coordinator. */
+export function validateParticipants(value) {
+  if (!Array.isArray(value) || !value.length || value.some((agent) => !AGENTS.includes(agent)) || new Set(value).size !== value.length) {
+    throw new Error("請至少選擇一個可用的 AI。");
+  }
+  if (value.length > 1 && !value.some((agent) => COORDINATORS.includes(agent))) throw new Error("多個 AI 協作時，至少要選擇 Codex 或 Claude 擔任統籌。");
+  return normalizeParticipants(value);
+}
+/** One agent alone is its own workflow; two or more are coordinated. */
+export function workflowFor(participants) { return participants.length === 1 ? participants[0] : "coordinated"; }
+/** The coordinator must be a participant that can coordinate; otherwise the first such participant leads. */
+export function coordinatorFor(coordinator, participants) {
+  const candidates = participants.filter((agent) => COORDINATORS.includes(agent));
+  return candidates.includes(coordinator) ? coordinator : candidates[0] ?? normalizeCoordinator(coordinator);
+}
+
+/** The planning schema whose step agents are limited to this conversation's participants. */
+export function planSchema(participants = COORDINATORS) {
+  const schema = structuredClone(PLAN_SCHEMA);
+  schema.properties.steps.items.properties.agent.enum = normalizeParticipants(participants);
+  return schema;
+}
 
 export const PLAN_SCHEMA = {
   type: "object",
@@ -23,7 +61,7 @@ export const PLAN_SCHEMA = {
       type: "array", minItems: 1, maxItems: 4,
       items: {
         type: "object",
-        properties: { title: { type: "string" }, instruction: { type: "string" }, agent: { type: "string", enum: AGENTS } },
+        properties: { title: { type: "string" }, instruction: { type: "string" }, agent: { type: "string", enum: [...COORDINATORS] } },
         required: ["title", "instruction", "agent"], additionalProperties: false,
       },
     },
@@ -66,8 +104,14 @@ export function acceptanceList(value) {
   return items.map(text).filter(Boolean).slice(0, 8);
 }
 
-/** Strict validation for schema-backed (Codex) planning output; steps without a valid agent go to the non-coordinator. */
-export function validatePlan(output, { coordinator = DEFAULT_COORDINATOR } = {}) {
+/** Who executes a step the plan did not assign to a participant: another participant, else the coordinator itself. */
+export function fallbackExecutor(coordinator, participants = COORDINATORS) {
+  const lead = normalizeCoordinator(coordinator);
+  return participants.find((agent) => agent !== lead) ?? lead;
+}
+
+/** Strict validation for schema-backed (Codex) planning output; steps without a participating agent go to a fallback executor. */
+export function validatePlan(output, { coordinator = DEFAULT_COORDINATOR, participants = COORDINATORS } = {}) {
   let value;
   try { value = typeof output === "string" ? JSON.parse(output) : output; } catch { throw new Error("Planner returned an invalid planning response: expected JSON."); }
   if (!value || typeof value !== "object" || Array.isArray(value) || !text(value.summary) || !["answer", "review", "change"].includes(value.kind)
@@ -76,18 +120,18 @@ export function validatePlan(output, { coordinator = DEFAULT_COORDINATOR } = {})
     || value.steps.some((step) => !step || !text(step.title) || !text(step.instruction))) {
     throw new Error("Planner returned an invalid planning response: summary, kind, 1–4 steps and acceptance are required.");
   }
-  const fallbackAgent = otherAgent(normalizeCoordinator(coordinator));
+  const fallbackAgent = fallbackExecutor(coordinator, participants);
   return { summary: value.summary.trim(), kind: value.kind, acceptance: acceptanceList(value.acceptance),
     steps: value.steps.map((step) => ({ title: step.title.trim().slice(0, 120), instruction: step.instruction.trim().slice(0, 4000),
-      agent: AGENTS.includes(step.agent) ? step.agent : fallbackAgent })) };
+      agent: participants.includes(step.agent) ? step.agent : fallbackAgent })) };
 }
 
 /** Lenient parsing for free-text (Claude) planning: extract the JSON object, else one step covering the request. */
-export function lenientPlan(output, request, { coordinator = DEFAULT_COORDINATOR } = {}) {
+export function lenientPlan(output, request, { coordinator = DEFAULT_COORDINATOR, participants = COORDINATORS } = {}) {
   const value = jsonObject(output);
-  if (value) { try { return validatePlan(value, { coordinator }); } catch { /* fall through */ } }
+  if (value) { try { return validatePlan(value, { coordinator, participants }); } catch { /* fall through */ } }
   return { summary: "我會直接處理這則訊息。", kind: "change", acceptance: [], fallback: true,
-    steps: [{ title: "處理需求", instruction: request, agent: otherAgent(normalizeCoordinator(coordinator)) }] };
+    steps: [{ title: "處理需求", instruction: request, agent: fallbackExecutor(coordinator, participants) }] };
 }
 
 /**
@@ -134,24 +178,33 @@ export function agentState(agent, { quotas = {}, exhausted = {}, now = Date.now(
 }
 
 /**
- * The agent that takes a role now: the preferred agent while it is available, otherwise the other one.
- * A forced workflow keeps its agent and never spills over. `agent` is null when nobody can take the role.
+ * The agent that takes a role now: the preferred agent while it is available, otherwise the next participant that
+ * can take the role (only coordinators plan and review). A forced workflow keeps its agent and never spills over.
+ * `agent` is null when nobody can take the role.
  */
-export function pickAgent({ preferred, forced = null, ...context } = {}) {
-  const states = Object.fromEntries(AGENTS.map((agent) => [agent, agentState(agent, context)]));
-  const candidates = forced ? [forced] : [AGENTS.includes(preferred) ? preferred : DEFAULT_COORDINATOR, otherAgent(AGENTS.includes(preferred) ? preferred : DEFAULT_COORDINATOR)];
+export function pickAgent({ preferred, forced = null, participants = COORDINATORS, role = "execute", ...context } = {}) {
+  const team = forced ? [forced] : participants;
+  const states = Object.fromEntries(team.map((agent) => [agent, agentState(agent, context)]));
+  const pool = forced ? [forced] : team.filter((agent) => role !== "coordinate" || COORDINATORS.includes(agent));
+  const first = pool.includes(preferred) ? preferred : pool.includes(DEFAULT_COORDINATOR) ? DEFAULT_COORDINATOR : pool[0];
+  const candidates = first ? [first, ...pool.filter((agent) => agent !== first)] : [];
   return { states, agent: candidates.find((agent) => states[agent].available) ?? null };
 }
 
 /** One line for the composer and stage notes, e.g. "Codex 統籌與審查 · 依任務指派執行". */
-export function describeCoordination(coordinator, states = {}) {
+export function describeCoordination(coordinator, states = {}, participants = COORDINATORS) {
   const lead = normalizeCoordinator(coordinator);
-  const other = otherAgent(lead);
   const available = (agent) => states[agent]?.available !== false;
-  if (!available(lead) && !available(other)) return "兩邊額度都已用盡";
-  if (!available(lead)) return `${AGENT_NAMES[lead]} 額度已用盡，改由 ${AGENT_NAMES[other]} 統籌`;
-  if (!available(other)) return `${AGENT_NAMES[other]} 額度已用盡，由 ${AGENT_NAMES[lead]} 統籌並執行`;
-  return `${AGENT_NAMES[lead]} 統籌與審查 · 依任務指派執行`;
+  const others = participants.filter((agent) => agent !== lead);
+  const usable = others.filter(available);
+  const names = (agents) => agents.map((agent) => AGENT_NAMES[agent]).join("、");
+  if (!available(lead) && !usable.length) return others.length ? "所有 AI 額度都已用盡" : `${AGENT_NAMES[lead]} 額度已用盡`;
+  if (!available(lead)) {
+    const next = usable.find((agent) => COORDINATORS.includes(agent));
+    return next ? `${AGENT_NAMES[lead]} 額度已用盡，改由 ${AGENT_NAMES[next]} 統籌` : `${AGENT_NAMES[lead]} 額度已用盡，等待恢復後統籌`;
+  }
+  if (others.length && !usable.length) return `${names(others)} 額度已用盡，由 ${AGENT_NAMES[lead]} 統籌並執行`;
+  return `${AGENT_NAMES[lead]} 統籌與審查 · 依任務指派${others.length > 1 ? ` ${names(usable)} ` : ""}執行`;
 }
 
 const QUOTA_PATTERNS = /usage limit|limit (?:has been )?reached|hit your (?:usage )?limit|quota (?:exceeded|exhausted)|insufficient_quota|out of (?:usage|credits)|(?:5|five)[- ]hour limit|weekly limit|額度已(?:用完|用盡)|rate_limit_exceeded/i;

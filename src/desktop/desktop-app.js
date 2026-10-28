@@ -58,7 +58,7 @@ export async function createDesktopApp(options = {}) {
     title: "Codex × Claude｜聊天室", backgroundColor: "#fafafa", autoHideMenuBar: true,
     webPreferences: { preload: path.join(projectRoot, "src", "desktop", "preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
-  const allowed = new Set(["getSnapshot", "refreshStatus", "createTask", "createConversation", "sendMessage", "resumeTask", "importImages", "deleteConversation", "cancelTask", "startBridge", "stopBridge", "launchApp", "closeApp", "updateSettings"]);
+  const allowed = new Set(["getSnapshot", "refreshStatus", "createTask", "createConversation", "sendMessage", "resumeTask", "importImages", "deleteConversation", "cancelTask", "startBridge", "stopBridge", "loginAgent", "launchApp", "closeApp", "updateSettings"]);
   for (const name of allowed) ipcMain.handle(`bridge:${name}`, (event, ...args) => {
     if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) throw new Error("Invalid application context");
     const method = name === "getSnapshot" ? services.snapshot : services[name];

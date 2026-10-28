@@ -1,8 +1,7 @@
 import { readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-const AGENTS = new Set(["codex", "claude"]);
+import { PROVIDERS } from "./providers.js";
 
 function environmentValue(env, name) {
   const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
@@ -55,11 +54,11 @@ function isFile(file) {
   try { return statSync(file).isFile(); } catch { return false; }
 }
 
-function findOnPath(agent, env) {
+function findOnPath(name, env) {
   for (const directory of pathEntries(env)) {
     // PowerShell scripts cannot be spawned directly by Node/Electron.
     for (const extension of [".exe", ".cmd"]) {
-      const candidate = path.resolve(directory, `${agent}${extension}`);
+      const candidate = path.resolve(directory, `${name}${extension}`);
       if (isFile(candidate)) return candidate;
     }
   }
@@ -118,12 +117,13 @@ function bundledClaude(appData) {
 
 /** Resolve only known local CLI locations; explicit command overrides are handled by the caller. */
 export function resolveCliCommand(agent, options = {}) {
-  if (!AGENTS.has(agent)) throw new Error("Unknown CLI agent.");
-  const fallback = { command: agent, args: [] };
+  if (!Object.hasOwn(PROVIDERS, agent)) throw new Error("Unknown CLI agent.");
+  const name = PROVIDERS[agent].cli;
+  const fallback = { command: name, args: [] };
   if ((options.platform ?? process.platform) !== "win32") return fallback;
   const env = options.env ?? process.env;
   const roots = directories(env, options);
-  const command = findOnPath(agent, buildCliEnvironment(env, options))
-    || (agent === "codex" ? bundledCodex(roots.localAppData) : bundledClaude(roots.appData));
+  const bundled = { codex: () => bundledCodex(roots.localAppData), claude: () => bundledClaude(roots.appData) }[agent];
+  const command = findOnPath(name, buildCliEnvironment(env, options)) || bundled?.() || null;
   return command ? { command, args: [] } : fallback;
 }

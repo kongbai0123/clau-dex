@@ -129,7 +129,7 @@ async function runSmoke() {
     report.checks.push('Separate App management retains ownership safeguards');
     await js("document.querySelector('[data-view=settings]').click(); document.querySelector('#close-launched-apps').click()");
     await until(() => services.snapshot().settings.closeLaunchedApps, 'Shutdown preference not saved.');
-    await js("document.querySelector('[data-view=workspace]').click(); document.querySelector('[data-workflow=claude]').click()");
+    await js("document.querySelector('[data-view=workspace]').click(); (()=>{const want='claude';const chip=id=>document.querySelector('[data-participant='+id+']');if(!chip(want).classList.contains('selected'))chip(want).click();let other;while((other=Array.from(document.querySelectorAll('[data-participant].selected')).find(el=>el.dataset.participant!==want)))other.click();})()");
     // Recreate the old obstruction even when the product notification moves elsewhere.
     await js("showToast('通知出現時，傳送按鈕仍可點擊'); const toast=document.querySelector('#toast'); toast.style.top='auto'; toast.style.bottom='24px'");
     assert.equal(await js("document.querySelector('#toast').hidden"), false);
@@ -141,7 +141,7 @@ async function runSmoke() {
     await until(() => task('等待取消驗證')?.status === 'cancelled', 'Stop did not terminate worker tree.');
     report.checks.push('Real send click works while a settings notification overlays the composer; stop cancels owned process tree');
     await newChat(); await pause(120);
-    await js("document.querySelector('[data-workflow=claude]').click()");
+    await js("(()=>{const want='claude';const chip=id=>document.querySelector('[data-participant='+id+']');if(!chip(want).classList.contains('selected'))chip(want).click();let other;while((other=Array.from(document.querySelectorAll('[data-participant].selected')).find(el=>el.dataset.participant!==want)))other.click();})()");
     await send('等待關閉視窗驗證');
     await until(() => task('等待關閉視窗驗證')?.status === 'running', 'Second room worker did not start.');
     await until(() => runtime.activeProcesses().length > 0, 'No owned process tracked.'); await pause(250);
