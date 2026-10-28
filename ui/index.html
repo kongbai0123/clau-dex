@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: bridge-image:; connect-src 'none'; object-src 'none'; base-uri 'none'" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="description" content="在同一個工作台管理 Codex、Claude Code 與協作任務。" />
+    <title>Bridge · 聊天室</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="i-workspace" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.7"/><rect x="14" y="3" width="7" height="7" rx="1.7"/><rect x="3" y="14" width="7" height="7" rx="1.7"/><rect x="14" y="14" width="7" height="7" rx="1.7"/></symbol>
+      <symbol id="i-apps" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="15" rx="2.5"/><path d="M3 9h18M9 9v10"/><path d="M6 6.5h.01M9 6.5h.01"/></symbol>
+      <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.3 7M3 4v7h7M12 7v5l3 2"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/><path d="m10 3-.7 2.4-1.4.8-2.4-.6-2 3.4 1.7 1.8v1.6l-1.7 1.8 2 3.4 2.4-.6 1.4.8L10 20h4l.7-2.4 1.4-.8 2.4.6 2-3.4-1.7-1.8v-1.6l1.7-1.8-2-3.4-2.4.6-1.4-.8L14 3Z"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M3 8h18"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7a9 9 0 0 0-15-2L3 8m0-5v5h5M4 17a9 9 0 0 0 15 2l2-3m0 5v-5h-5"/></symbol>
+      <symbol id="i-codex" viewBox="0 0 24 24"><path d="m8 5-5 7 5 7m8-14 5 7-5 7M14 3l-4 18"/></symbol>
+      <symbol id="i-claude" viewBox="0 0 24 24"><path d="M12 2v20M2 12h20M5 5l14 14M5 19 19 5M8 3l8 18M3 8l18 8M3 16l18-8M8 21l8-18"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 4 13 8-13 8Z"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4M8 15l-1 1a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0M16 9l1-1a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0" transform="translate(0 -1) scale(.95)"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+      <symbol id="i-warning" viewBox="0 0 24 24"><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5m0 3h.01"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 9 3 3-3 3m7 0h5"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    </svg>
+
+
+    <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11a8 8 0 0 1-8 8H6l-4 3V11a9 9 0 0 1 19 0Z"/><path d="M7 10h10m-10 4h6"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h6m4 0h6M4 17h2m4 0h10"/><circle cx="12" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
+      <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M15 4v16M17.5 8.5h1M17.5 11.5h1"/></symbol>
+      <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4 17a8 8 0 1 1 16 0"/><path d="m12 17 4-6"/></symbol>
+      <symbol id="i-attach" viewBox="0 0 24 24"><path d="m8 12 7-7a4 4 0 1 1 6 6L10 22a6 6 0 0 1-8-8L13 3m-8 14 11-11a2 2 0 0 1 3 3L8 20" transform="translate(1 0) scale(.9)"/></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 4-6 5 7"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+    </svg>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主要導覽">
+        <a class="brand" href="#workspace" data-view="workspace" aria-label="Bridge 聊天室"><span class="brand-mark" aria-hidden="true"><span></span><span></span></span><span>bridge</span></a>
+        <button id="new-conversation" class="new-chat-button"><svg class="icon"><use href="#i-plus"/></svg><span>新對話</span><span class="new-chat-shortcut" aria-hidden="true">+</span></button>
+        <nav class="navigation">
+          <button class="nav-item active" data-view="workspace" aria-current="page"><svg class="icon"><use href="#i-chat"/></svg><span>聊天室</span></button>
+          <button class="nav-item" data-view="history"><svg class="icon"><use href="#i-history"/></svg><span>對話紀錄</span><span id="history-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view="apps"><svg class="icon"><use href="#i-apps"/></svg><span>App 管理</span></button>
+          <button class="nav-item" data-view="settings"><svg class="icon"><use href="#i-settings"/></svg><span>設定</span></button>
+        </nav>
+        <div class="recent-section"><div class="nav-caption">最近的對話</div><div id="recent-conversations" class="recent-conversations"></div></div>
+        <div class="sidebar-bottom"><button class="sidebar-service" data-view="apps"><span id="sidebar-dot" class="status-dot muted"></span><span id="sidebar-status">正在連接服務</span></button><p>關閉視窗，管理服務與執行中的任務會一併停止。</p></div>
+      </aside>
+      <div class="main-shell">
+        <header class="topbar"><div class="topbar-title"><span id="view-title">聊天室</span><span id="conversation-title" class="conversation-title">新對話</span></div><div class="topbar-actions"><button class="icon-button" data-new-conversation title="建立新對話" aria-label="建立新對話"><svg class="icon"><use href="#i-plus"/></svg></button><button id="toggle-inspector" class="icon-button" title="觀察面板 (Ctrl+J)" aria-label="顯示或隱藏觀察面板" aria-controls="inspector" aria-expanded="false"><svg class="icon"><use href="#i-panel"/></svg></button><button id="refresh-status" class="icon-button" title="重新檢查 App 與 CLI 狀態" aria-label="重新檢查 App 與 CLI 狀態"><svg class="icon"><use href="#i-refresh"/></svg></button></div></header>
+        <main id="main-content" tabindex="-1">
+          <section id="view-workspace" class="view chat-view active" aria-label="聊天室">
+            <div id="image-drop-overlay" class="image-drop-overlay" hidden><svg class="icon"><use href="#i-image"/></svg><strong>放開以加入圖片</strong><span>PNG、JPEG、WebP · 最多 8 張</span></div>
+            <div id="chat-scroll" class="chat-scroll"><div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-label="你、Codex 與 Claude 的對話"></div></div>
+            <div class="composer-wrap">
+              <div id="pause-banner" class="pause-banner" role="status" hidden></div>
+              <form id="task-form" class="chat-composer">
+                <input type="hidden" id="task-title"/>
+                <input id="image-file-input" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple hidden/>
+                <div id="draft-images" class="draft-images" role="list" aria-label="待傳送的圖片" hidden></div>
+                <label class="sr-only" for="task-description">傳送訊息</label>
+                <textarea id="task-description" name="message" rows="2" maxlength="8000" placeholder="傳送訊息給 Codex 與 Claude…"></textarea>
+                <div class="composer-toolbar"><div class="composer-context">
+                  <details id="chat-options" class="composer-options">
+                    <summary title="專案與對話選項" aria-label="專案與對話選項"><svg class="icon"><use href="#i-sliders"/></svg><span id="composer-context-label">專案與分工</span><svg class="icon chevron"><use href="#i-chevron"/></svg></summary>
+                    <div class="options-popover"><h2>對話選項</h2>
+                      <div class="field"><label for="task-workspace">工作資料夾 <span class="optional">選填</span></label><div class="input-with-action"><input id="task-workspace" placeholder="未選擇時使用預設工作資料夾" spellcheck="false" autocomplete="off"/><button type="button" id="select-workspace" class="input-action">選擇</button></div><p id="workspace-lock-hint" class="field-hint">未指定時使用預設資料夾；每則訊息都可以重新選擇。</p></div>
+                      <fieldset class="field"><legend>分配方式</legend><div class="segmented"><button class="segment selected" type="button" data-workflow="coordinated" aria-pressed="true">協作</button><button class="segment" type="button" data-workflow="codex" aria-pressed="false">Codex</button><button class="segment" type="button" data-workflow="claude" aria-pressed="false">Claude</button></div><p id="workflow-description" class="field-hint">統籌方把你的需求整理成驗收標準、依任務性質指派 Codex 或 Claude 執行，再逐條審查；未達標就退回修正（最多 2 輪），最後交付結果。額度只在一方用完時才交接。</p></fieldset>
+                      <fieldset class="field" id="coordinator-field"><legend>統籌方</legend><div class="segmented"><button class="segment selected" type="button" data-coordinator="codex" aria-pressed="true">Codex</button><button class="segment" type="button" data-coordinator="claude" aria-pressed="false">Claude</button></div><p id="coordinator-description" class="field-hint">負責規劃、指派、審查與交付；設定隨對話保存。</p></fieldset>
+                      <fieldset class="field effort-field"><legend>思考強度</legend><div class="effort-row" data-effort-row="codex"><div class="effort-head"><label class="effort-agent" for="effort-codex"><svg class="icon"><use href="#i-codex"/></svg>Codex</label><span id="effort-codex-label" class="effort-value">預設</span></div><input id="effort-codex" class="effort-slider" type="range" min="0" max="6" step="1" value="0" data-effort-agent="codex" aria-describedby="effort-description"/></div><div class="effort-row" data-effort-row="claude"><div class="effort-head"><label class="effort-agent" for="effort-claude"><svg class="icon"><use href="#i-claude"/></svg>Claude</label><span id="effort-claude-label" class="effort-value">預設</span></div><input id="effort-claude" class="effort-slider" type="range" min="0" max="5" step="1" value="0" data-effort-agent="claude" aria-describedby="effort-description"/></div><p id="effort-description" class="field-hint">最左邊是「預設」，沿用各 CLI 自己的設定。越往右思考越深入，回覆較慢、用量也較高；Max、Ultra 需目前模型支援。</p></fieldset>
+                    </div>
+                  </details><span id="composer-mode-label" class="composer-mode-label">協作</span>
+                </div><div id="composer-actions"><span id="attachment-status" class="attachment-status" aria-live="polite" hidden></span><button id="attach-images" type="button" class="icon-button attach-button" title="加入圖片（也可貼上或拖放）" aria-label="加入圖片"><svg class="icon"><use href="#i-attach"/></svg></button><button id="submit-task" type="submit" class="send-button" title="傳送訊息" aria-label="傳送訊息"><svg class="icon"><use href="#i-send"/></svg></button><button id="cancel-current-task" type="button" class="send-button cancel-button" title="停止這段對話的任務" aria-label="停止這段對話的任務" hidden><svg class="icon"><use href="#i-stop"/></svg></button></div></div>
+                <p id="composer-error" class="composer-error" role="alert" hidden></p>
+              </form><p class="composer-hint">Enter 傳送 · Shift + Enter 換行</p>
+            </div>
+          </section>
+          <section id="view-history" class="view content-view" aria-label="對話紀錄" hidden><div class="page-heading"><h1>對話紀錄</h1><p>回到你與 Codex、Claude 的每一段對話。</p></div><div class="history-toolbar"><div class="search-input"><svg class="icon"><use href="#i-search"/></svg><input id="history-search" type="search" placeholder="搜尋對話" aria-label="搜尋對話"/></div></div><div id="history-list" class="history-list"></div></section>
+          <section id="view-apps" class="view content-view" aria-label="App 管理" hidden>
+            <div class="page-heading"><h1>App 管理</h1><p>管理桌面 App、任務 CLI 與本機橋接服務。</p></div><div class="info-banner"><svg class="icon"><use href="#i-apps"/></svg><p>聊天室透過本機 CLI 執行工作。桌面 App 可以另外開啟；聊天室不會自動讀取 App 裡既有的對話。</p></div>
+            <div id="app-cards" class="app-grid"></div><section class="panel service-panel"><div class="panel-heading"><h2>本機 MCP 橋接</h2><svg class="icon"><use href="#i-link"/></svg></div><div id="app-bridge-detail"></div></section><p class="app-lifecycle-caption"><svg class="icon"><use href="#i-shield"/></svg>只會提供關閉由工作台自行啟動的 App。</p>
+          </section>
+          <section id="view-settings" class="view content-view" aria-label="設定" hidden>
+            <div class="page-heading"><h1>設定</h1><p>調整預設專案與關閉視窗時的行為。</p></div>
+            <section class="panel settings-panel"><div class="panel-heading"><h2>預設專案</h2><svg class="icon"><use href="#i-folder"/></svg></div><form id="settings-form"><div class="field"><label for="settings-workspace">專案資料夾</label><div class="input-with-action"><input id="settings-workspace" placeholder="尚未設定預設專案" spellcheck="false" autocomplete="off"/><button id="select-settings-workspace" class="input-action" type="button">選擇</button></div><p class="field-hint">新對話會預填這個專案。每段對話也可以選擇其他專案。</p></div><div class="settings-save"><button id="save-settings" class="button secondary" type="submit">儲存預設專案<svg class="icon"><use href="#i-check"/></svg></button></div></form></section>
+            <section class="panel settings-panel"><div class="panel-heading"><h2>關閉行為</h2><svg class="icon"><use href="#i-stop"/></svg></div><div class="setting-row"><div><h3>停止管理服務與任務</h3><p>關閉這個視窗時，MCP 橋接與工作台執行的 CLI 任務會停止。</p></div><span class="always-on"><svg class="icon"><use href="#i-check"/></svg>固定啟用</span></div><div class="setting-row"><div><h3>同時關閉工作台啟動的 App</h3><p>包含由此工作台開啟的 Codex 與 Claude 視窗。</p></div><label class="switch"><input id="close-launched-apps" type="checkbox" aria-label="關閉工作台時，同時關閉工作台啟動的 App"/><span class="switch-track"><span></span></span></label></div><p class="settings-note"><svg class="icon"><use href="#i-shield"/></svg>設定只套用到工作台自行啟動的程序。</p></section>
+          </section>
+        </main>
+      </div>
+      <aside id="inspector" class="inspector" aria-label="觀察面板" hidden>
+        <div class="inspector-header"><h2>觀察面板</h2><button class="icon-button" data-close-inspector title="隱藏觀察面板 (Ctrl+J)" aria-label="隱藏觀察面板"><svg class="icon"><use href="#i-close"/></svg></button></div>
+        <div class="inspector-tabs" role="tablist" aria-label="觀察面板分頁"><button role="tab" data-inspector-tab="usage" aria-selected="true">用量</button><button role="tab" data-inspector-tab="conversation" aria-selected="false">這段對話</button><button role="tab" data-inspector-tab="system" aria-selected="false">系統</button></div>
+        <div id="inspector-body" class="inspector-body" role="tabpanel" tabindex="0"></div>
+        <div id="ins-tooltip" class="ins-tooltip" role="tooltip" hidden></div>
+      </aside>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden><svg class="icon"><use href="#i-check"/></svg><span></span></div>
+    <div id="shutdown-overlay" class="shutdown-overlay" role="alert" aria-live="assertive" hidden><div class="shutdown-card"><div class="spinner"></div><h2>正在收尾…</h2><p>停止執行中的任務與管理服務後，視窗就會關閉。</p></div></div>
+    <dialog id="delete-conversation-dialog" class="conversation-dialog" aria-labelledby="delete-conversation-title"><h2 id="delete-conversation-title">刪除這段對話？</h2><p id="delete-conversation-description"></p><p>對話與訊息會被刪除；正在執行的任務也會停止。</p><p id="delete-conversation-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button id="cancel-delete-conversation" class="button secondary" type="button" autofocus>取消</button><button id="confirm-delete-conversation" class="button danger" type="button">刪除對話</button></div></dialog>
+    <dialog id="image-preview-dialog" class="image-preview-dialog" aria-label="圖片預覽"><button class="icon-button image-preview-close" data-close-image-preview type="button" aria-label="關閉圖片預覽"><svg class="icon"><use href="#i-close"/></svg></button><img id="image-preview" alt=""/><p id="image-preview-name"></p></dialog>
+  </body>
+</html>

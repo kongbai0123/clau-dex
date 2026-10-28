@@ -1,0 +1,29 @@
+{
+  "name": "codex-claude-bridge",
+  "version": "0.2.0",
+  "description": "Windows desktop manager for coordinating Codex and Claude Code CLI workflows.",
+  "private": true,
+  "type": "module",
+  "main": "src/desktop/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kongbai0123/clau-dex.git"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "desktop": "electron .",
+    "check": "node scripts/check.js",
+    "test": "node --test test/cli-discovery.test.js test/bridge.test.js test/runtime.test.js test/tasks.test.js test/app-manager.test.js test/http.test.js test/conversations.test.js test/attachments.test.js test/usage.test.js test/dispatch.test.js test/claude-quota.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "cross-spawn": "^7.0.6",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "electron": "44.7.0"
+  }
+}

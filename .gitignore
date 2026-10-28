@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.env*
+!.env.example
+.bridge/
+_to_delete/
+dist/
+coverage/
