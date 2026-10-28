@@ -9,7 +9,7 @@ const VIEW_LABELS = { workspace: "聊天室", apps: "App 管理", history: "對�
 const DEFAULT_PROVIDERS = [
   { id: "codex", name: "Codex", appName: "Codex", coordinate: true, tasks: true },
   { id: "claude", name: "Claude", appName: "Claude Code", coordinate: true, tasks: true },
-  { id: "antigravity", name: "Antigravity", appName: "Antigravity", coordinate: false, tasks: false },
+  { id: "antigravity", name: "Antigravity", appName: "Antigravity", coordinate: false, tasks: false, signInWith: "app" },
 ];
 const APP_SUBTITLES = { codex: "Codex 桌面應用程式", claude: "Claude Code 應用程式／終端機", antigravity: "Google Antigravity 桌面 App／agy CLI" };
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
@@ -29,6 +29,7 @@ function effortOf(value) {
 function providers() { return Array.isArray(state?.snapshot?.providers) && state.snapshot.providers.length ? state.snapshot.providers : DEFAULT_PROVIDERS; }
 function taskAgents() { return providers().filter((provider) => provider.tasks).map((provider) => provider.id); }
 function coordinators() { return providers().filter((provider) => provider.coordinate).map((provider) => provider.id); }
+function signsInWithApp(id) { return providers().find((provider) => provider.id === id)?.signInWith === "app"; }
 function agentName(id) { return providers().find((provider) => provider.id === id)?.name || "Codex"; }
 function appName(id) { return providers().find((provider) => provider.id === id)?.appName || agentName(id); }
 /** The AI picked for a room; rooms saved before multi-select only stored a workflow. */
@@ -170,9 +171,15 @@ async function importImageFiles(fileList) {
 function dateLabel(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("zh-TW", { timeZone: "Asia/Taipei", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date); }
 function errorMessage(error) { return String(typeof error === "string" ? error : error?.message || "操作未完成，請稍後重試。").replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, ""); }
 function statusBadge(label, type = "ready") { return `<span class="status-badge ${type}"><span class="status-dot ${type === "ready" ? "" : type}"></span>${escapeHtml(label)}</span>`; }
-function agentStatus(agent = {}) {
+function agentStatus(agent = {}, key) {
   if (!state.loaded || state.apiError) return { text: "狀態待確認", type: "muted" };
-  if (agent.login?.state === "pending") return { text: "等待瀏覽器授權…", type: "warning" };
+  const viaApp = signsInWithApp(key);
+  if (agent.login?.state === "pending") return { text: viaApp ? "等待在 App 內登入…" : "等待瀏覽器授權…", type: "warning" };
+  if (viaApp) {
+    const marker = agent.credentialPresent === true ? "偵測到憑證（有效性未驗證）"
+      : agent.credentialPresent === false ? "未偵測到登入憑證" : "憑證狀態待確認";
+    return { text: marker + (agent.available ? " · CLI 可用" : " · CLI 不可用"), type: "warning" };
+  }
   if (!agent.available) return { text: "CLI 不可用", type: "muted" };
   if (agent.authenticated === false) return { text: "需要登入", type: "warning" };
   if (agent.authenticated === true) return { text: "CLI 已登入", type: "ready" };
@@ -209,7 +216,7 @@ function syncOptionControls() {
   const team = state.options.participants; const lead = coordinatorOf(state.options.coordinator, team);
   const locked = Boolean(activeTaskId() || state.busy.has("send-message") || state.snapshot.shuttingDown);
   $("#participant-chips").innerHTML = providers().map((provider) => {
-    const selected = team.includes(provider.id); const agent = state.snapshot.agents?.[provider.id] || {}; const status = agentStatus(agent);
+    const selected = team.includes(provider.id); const agent = state.snapshot.agents?.[provider.id] || {}; const status = agentStatus(agent, provider.id);
     const unsupported = !provider.tasks;
     const title = unsupported ? `${provider.appName} 目前只能在 App 管理查看狀態與登入，還不能接聊天室任務` : `${provider.appName} · ${status.text}${selected && team.length === 1 ? "（至少保留一個 AI）" : ""}`;
     return `<button type="button" class="participant-chip ${provider.id}${selected ? " selected" : ""}" data-participant="${escapeHtml(provider.id)}" aria-pressed="${selected}" title="${escapeHtml(title)}" ${unsupported || locked ? "disabled" : ""}>${icon(selected ? "check" : provider.id)}<span>${escapeHtml(provider.name)}</span>${unsupported ? '<small>即將支援</small>' : `<i class="status-dot ${status.type === "ready" ? "" : status.type}" aria-hidden="true"></i>`}</button>`;
@@ -280,16 +287,20 @@ function renderBridge() {
 }
 /** Sign-in goes through the CLI's own console and browser authorization; Bridge only watches for the result. */
 function loginControl(key, agent, compact = false) {
-  if (!state.loaded || !agent.available) return "";
+  if (!state.loaded || (!agent.available && !signsInWithApp(key))) return "";
   const pending = agent.login?.state === "pending"; const busy = state.busy.has(`login-${key}`);
-  if (agent.authenticated !== false && !pending) return "";
-  return `<button class="button ${compact ? "secondary small" : "primary"}" data-login-agent="${escapeHtml(key)}" ${busy || pending || state.snapshot.shuttingDown ? "disabled" : ""}>${icon("link")}${pending ? "等待授權…" : busy ? "開啟中…" : `登入 ${escapeHtml(appName(key))}`}</button>`;
+  const viaApp = signsInWithApp(key);
+  if (!viaApp && agent.authenticated !== false && !pending) return "";
+  const label = pending ? "等待授權…" : busy ? "開啟中…"
+    : viaApp ? `開啟 ${escapeHtml(appName(key))}／重新登入` : `登入 ${escapeHtml(appName(key))}`;
+  return `<button class="button ${compact ? "secondary small" : "primary"}" data-login-agent="${escapeHtml(key)}" ${busy || pending || state.snapshot.shuttingDown ? "disabled" : ""}>${icon("link")}${label}</button>`;
 }
 function renderApps() {
   $("#app-cards").innerHTML = providers().map(({ id: key }) => {
     const app = state.snapshot.apps?.[key] || {}; const agent = state.snapshot.agents?.[key] || {}; const busy = state.busy.has(`app-${key}`); const name = appName(key);
     const pids = Array.isArray(app.pids) ? app.pids : []; const ownership = app.managed ? "由工作台啟動" : app.running ? "在工作台外啟動" : "尚未啟動";
-    return `<article class="app-card"><div class="app-card-header"><div class="agent-avatar ${key}">${icon(key)}</div><div><h2 class="app-title">${name}</h2><p class="app-subtitle">${escapeHtml(APP_SUBTITLES[key] || `${name} 桌面應用程式`)}</p></div>${statusBadge(!state.loaded ? "檢查中" : app.running ? "執行中" : app.installed ? "已停止" : "未偵測到", app.running ? "ready" : "muted")}</div><div class="app-card-body"><div class="app-data"><span>安裝狀態</span><strong>${!state.loaded ? "正在檢查" : app.installed ? "已找到啟動程式" : "尚未找到啟動程式"}</strong></div><div class="app-data"><span>程序管理</span><strong>${ownership}</strong></div><div class="app-data"><span>程序編號</span><code>${pids.length ? escapeHtml(pids.join(", ")) : "—"}</code></div><div class="app-data"><span>任務 CLI</span><strong>${escapeHtml(agentStatus(agent).text)}</strong></div>${agent.version ? `<div class="app-data"><span>CLI 版本</span><code>${escapeHtml(agent.version)}</code></div>` : ""}</div><div class="app-card-footer"><button class="button primary" data-launch-app="${key}" ${busy || !app.installed || state.snapshot.shuttingDown ? "disabled" : ""}>${icon("play")}${busy ? "處理中…" : app.running ? "開啟 App" : "啟動 App"}</button><button class="button secondary" data-close-app="${key}" ${busy || !app.managed || !app.running || state.snapshot.shuttingDown ? "disabled" : ""} title="${app.managed ? "關閉由工作台啟動的 App" : "只能關閉由工作台啟動的 App"}">${icon("close")}關閉 App</button>${loginControl(key, agent)}</div><p class="app-hint">${agent.login?.state === "pending" ? "已開啟登入視窗：請在瀏覽器完成授權，完成後這裡會自動更新。" : app.managed ? "這個 App 由工作台啟動，可以在此關閉。" : app.running ? "此 App 由其他地方啟動；可在它自己的視窗中關閉。" : "開啟 App 不會自動開始聊天室任務。"}${key === "antigravity" && state.loaded && !agent.available ? " 聊天室任務需要 agy CLI；目前尚未偵測到，可先在 Antigravity App 內登入 Google 帳號。" : ""}</p>${agent.login?.state === "failed" ? `<p class="inline-error">${escapeHtml(agent.login.message)}</p>` : app.error || (agent.error && !(key === "antigravity" && !agent.available)) ? `<p class="inline-error">${escapeHtml(app.error || agent.error)}</p>` : ""}</article>`;
+    const loginHint = ["pending", "opened"].includes(agent.login?.state) ? agent.login.message : null;
+    return `<article class="app-card"><div class="app-card-header"><div class="agent-avatar ${key}">${icon(key)}</div><div><h2 class="app-title">${name}</h2><p class="app-subtitle">${escapeHtml(APP_SUBTITLES[key] || `${name} 桌面應用程式`)}</p></div>${statusBadge(!state.loaded ? "檢查中" : app.running ? "執行中" : app.installed ? "已停止" : "未偵測到", app.running ? "ready" : "muted")}</div><div class="app-card-body"><div class="app-data"><span>安裝狀態</span><strong>${!state.loaded ? "正在檢查" : app.installed ? "已找到啟動程式" : "尚未找到啟動程式"}</strong></div><div class="app-data"><span>程序管理</span><strong>${ownership}</strong></div><div class="app-data"><span>程序編號</span><code>${pids.length ? escapeHtml(pids.join(", ")) : "—"}</code></div><div class="app-data"><span>任務 CLI</span><strong>${escapeHtml(agentStatus(agent, key).text)}</strong></div>${agent.version ? `<div class="app-data"><span>CLI 版本</span><code>${escapeHtml(agent.version)}</code></div>` : ""}</div><div class="app-card-footer"><button class="button primary" data-launch-app="${key}" ${busy || !app.installed || state.snapshot.shuttingDown ? "disabled" : ""}>${icon("play")}${busy ? "處理中…" : app.running ? "開啟 App" : "啟動 App"}</button><button class="button secondary" data-close-app="${key}" ${busy || !app.managed || !app.running || state.snapshot.shuttingDown ? "disabled" : ""} title="${app.managed ? "關閉由工作台啟動的 App" : "只能關閉由工作台啟動的 App"}">${icon("close")}關閉 App</button>${loginControl(key, agent)}</div><p class="app-hint">${loginHint ? escapeHtml(loginHint) : app.managed ? "這個 App 由工作台啟動，可以在此關閉。" : app.running ? "此 App 由其他地方啟動；可在它自己的視窗中關閉。" : "開啟 App 不會自動開始聊天室任務。"}${key === "antigravity" && state.loaded ? " Antigravity 目前只提供 App 管理，尚未啟用聊天室任務；憑證存在不代表登入仍有效。" : ""}</p>${agent.login?.state === "failed" ? `<p class="inline-error">${escapeHtml(agent.login.message)}</p>` : app.error || (agent.error && !(key === "antigravity" && !agent.available)) ? `<p class="inline-error">${escapeHtml(app.error || agent.error)}</p>` : ""}</article>`;
   }).join("");
 }
 function renderComposer() {
@@ -600,7 +611,7 @@ function conversationTabHtml() {
 }
 function systemTabHtml() {
   const agents = providers().map(({ id: key }) => {
-    const agent = state.snapshot.agents?.[key] || {}; const status = agentStatus(agent); const app = state.snapshot.apps?.[key] || {};
+    const agent = state.snapshot.agents?.[key] || {}; const status = agentStatus(agent, key); const app = state.snapshot.apps?.[key] || {};
     return `<div class="ins-agent-row"><span class="ins-agent"><i style="background:${AGENT_COLORS[key]}"></i>${AGENT_NAMES[key]}</span>${statusBadge(status.text, status.type)}</div><p class="ins-tokens">${agent.version ? `<code>${escapeHtml(agent.version)}</code> · ` : ""}App ${app.running ? "執行中" : app.installed ? "未執行" : "未偵測到"}</p>${agent.commandPath ? `<p class="ins-tokens" style="overflow-wrap:anywhere">CLI：<code>${escapeHtml(agent.commandPath)}</code></p>` : ""}${agent.error ? `<p class="inline-error">${escapeHtml(agent.error)}</p>` : ""}`;
   }).join("");
   const processes = Array.isArray(state.snapshot.processes) ? state.snapshot.processes : [];
@@ -755,7 +766,7 @@ document.addEventListener("click", async (event) => {
     if (next.length > 1 && !next.some((agent) => coordinators().includes(agent))) { showToast("多個 AI 協作時，至少要選擇 Codex 或 Claude 擔任統籌。", true); return; }
     state.options.participants = next; state.options.coordinator = coordinatorOf(state.options.coordinator, next); state.optionDirty = true; state.error = null; syncOptionControls(); renderComposer(); return;
   }
-  const loginButton = event.target.closest("[data-login-agent]"); if (loginButton && !loginButton.disabled) { const key = loginButton.dataset.loginAgent; await action(`login-${key}`, async () => { const result = await invoke("loginAgent", key); applySnapshot(await invoke("getSnapshot")); return result; }, `已開啟 ${appName(key)} 登入視窗，請在瀏覽器完成授權`); return; }
+  const loginButton = event.target.closest("[data-login-agent]"); if (loginButton && !loginButton.disabled) { const key = loginButton.dataset.loginAgent; await action(`login-${key}`, async () => { const result = await invoke("loginAgent", key); applySnapshot(await invoke("getSnapshot")); return result; }, signsInWithApp(key) ? `已開啟 ${appName(key)}，請在 App 內確認帳號或登入` : `已開啟 ${appName(key)} 登入視窗，請在瀏覽器完成授權`); return; }
   const resumeButton = event.target.closest("[data-resume-task]"); if (resumeButton && !resumeButton.disabled) { const id = resumeButton.dataset.resumeTask; await action(`resume-${id}`, async () => { const result = await invoke("resumeTask", id); applySnapshot(await invoke("getSnapshot")); return result; }, "已接續，正在從中斷處繼續"); return; }
   const cancel = event.target.closest("[data-cancel-task]"); if (cancel && !cancel.disabled) { const id = cancel.dataset.cancelTask; await action(`cancel-${id}`, async () => { const result = await invoke("cancelTask", id); applySnapshot(await invoke("getSnapshot")); return result; }); return; }
   const copy = event.target.closest("[data-copy-message]"); if (copy) { const message = conversation()?.messages?.find((candidate) => candidate.id === copy.dataset.copyMessage); try { if (!navigator.clipboard?.writeText) throw new Error("請選取文字並使用 Ctrl + C 複製。"); await navigator.clipboard.writeText(message?.content || ""); showToast("回覆已複製"); } catch (error) { showToast(errorMessage(error), true); } return; }

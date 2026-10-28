@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -12,6 +11,7 @@ import { AGENTS, COORDINATORS, MAX_REVISION_ROUNDS, QuotaPausedError, REVIEW_SCH
 import { PROVIDERS, PROVIDER_IDS, providerName } from "./providers.js";
 import { diffTrees, snapshotTree } from "./checkpoints.js";
 import { buildCliEnvironment, resolveCliCommand } from "./cli-discovery.js";
+import { createWindowsCredentialProbe } from "./credential-status.js";
 
 const MAX_CAPTURE_BYTES = 2_000_000;
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
@@ -267,17 +267,7 @@ export function codexUsage(events) {
   }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: null, turns: turns.length, models: [] });
 }
 
-/** Whether Windows Credential Manager lists a generic credential with this target. Only names are listed, never secrets. */
-function windowsCredentialExists(target) {
-  if (process.platform !== "win32") return Promise.resolve(null);
-  return new Promise((resolve) => {
-    execFile("cmdkey.exe", [`/list:${target}`], { windowsHide: true, timeout: PROBE_TIMEOUT_MS, encoding: "utf8" }, (error, stdout) => {
-      if (error) { resolve(null); return; }
-      const lower = target.toLowerCase();
-      resolve(String(stdout).split(/\r?\n/).some((line) => line.toLowerCase().includes(`target=${lower}`) || line.trim().toLowerCase().endsWith(`: ${lower}`)));
-    });
-  });
-}
+const windowsCredentialExists = createWindowsCredentialProbe({ timeoutMs: PROBE_TIMEOUT_MS });
 
 /** A CLI supervisor shared by the desktop manager and the MCP adapter. */
 export function createAgentRuntime(options = {}) {
@@ -294,6 +284,7 @@ export function createAgentRuntime(options = {}) {
   const quotaTimeoutMs = Number.isFinite(options.quotaTimeoutMs) && options.quotaTimeoutMs > 0
     ? Math.min(options.quotaTimeoutMs, QUOTA_TIMEOUT_MS) : QUOTA_TIMEOUT_MS;
   const processes = new Set();
+  const credentialChecks = new Set();
   let closed = false;
   let closing;
 
@@ -307,6 +298,28 @@ export function createAgentRuntime(options = {}) {
   function ensureOpen(signal) {
     if (closed) throw abortError("The agent runtime has closed.");
     if (signal?.aborted) throw abortError();
+  }
+
+  function readCredentialPresence(target, signal) {
+    ensureOpen(signal);
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const entry = { controller, finished: null };
+    entry.finished = Promise.resolve().then(() => {
+      ensureOpen(signal);
+      if (controller.signal.aborted) throw abortError();
+      return credentialExists(target, { signal: controller.signal });
+    }).then((present) => {
+      ensureOpen(signal);
+      if (controller.signal.aborted) throw abortError();
+      return present === true ? true : present === false ? false : null;
+    }).finally(() => {
+      signal?.removeEventListener("abort", onAbort);
+      credentialChecks.delete(entry);
+    });
+    credentialChecks.add(entry);
+    return entry.finished;
   }
 
   async function killTree(entry) {
@@ -434,33 +447,41 @@ export function createAgentRuntime(options = {}) {
   async function probeAgent(agent, signal) {
     if (!Object.hasOwn(PROVIDERS, agent)) throw new Error("Unknown CLI agent.");
     const provider = PROVIDERS[agent];
-    const status = { available: false, authenticated: false, version: null, error: null, commandPath: redact(commandFor(agent).command) };
+    const credentialOnly = provider.signInWith === "app" && Boolean(provider.credentialTarget);
+    const status = { available: false, authenticated: credentialOnly ? null : false, version: null, error: null,
+      commandPath: redact(commandFor(agent).command),
+      ...(credentialOnly ? { credentialPresent: null, authSource: "credential-entry" } : { authSource: "cli-status" }) };
     try {
       const version = await execute(agent, ["--version"], { limitMs: PROBE_TIMEOUT_MS, signal });
-      if (version.exitCode !== 0) { status.error = "CLI version check failed."; return status; }
-      status.available = true;
-      status.version = `${agent} ${(`${version.stdout}\n${version.stderr}`).match(/\b\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?\b/)?.[0] ?? "unknown"}`;
-      if (!provider.status) {
-        // No status command: the sign-in entry the CLI keeps in Credential Manager is checked by name only.
-        status.authenticated = provider.credentialTarget ? await credentialExists(provider.credentialTarget) === true : false;
-        if (!status.authenticated) status.error = "Sign in to this CLI before assigning tasks.";
-        return status;
-      }
-      const auth = await execute(agent, provider.status, {
-        limitMs: PROBE_TIMEOUT_MS, signal,
-      });
-      if (agent === "claude") {
-        let parsed;
-        try { parsed = JSON.parse(auth.stdout); } catch { /* Older CLI can return plain text. */ }
-        status.authenticated = auth.exitCode === 0 && (parsed
-          ? parsed.loggedIn === true || parsed.authenticated === true
-          : /logged in|authenticated/i.test(`${auth.stdout}\n${auth.stderr}`));
+      if (version.exitCode !== 0) {
+        status.error = "CLI version check failed.";
       } else {
-        status.authenticated = auth.exitCode === 0 && !/not logged in|not authenticated/i.test(`${auth.stdout}\n${auth.stderr}`);
+        status.available = true;
+        status.version = `${agent} ${(`${version.stdout}\n${version.stderr}`).match(/\b\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?\b/)?.[0] ?? "unknown"}`;
+        if (provider.status) {
+          const auth = await execute(agent, provider.status, { limitMs: PROBE_TIMEOUT_MS, signal });
+          if (agent === "claude") {
+            let parsed;
+            try { parsed = JSON.parse(auth.stdout); } catch { /* Older CLI can return plain text. */ }
+            status.authenticated = auth.exitCode === 0 && (parsed
+              ? parsed.loggedIn === true || parsed.authenticated === true
+              : /logged in|authenticated/i.test(`${auth.stdout}\n${auth.stderr}`));
+          } else {
+            status.authenticated = auth.exitCode === 0 && !/not logged in|not authenticated/i.test(`${auth.stdout}\n${auth.stderr}`);
+          }
+          if (!status.authenticated) status.error = "Sign in to this CLI before assigning tasks.";
+        }
       }
-      if (!status.authenticated) status.error = "Sign in to this CLI before assigning tasks.";
     } catch (error) {
       status.error = error.name === "AbortError" ? "Status check cancelled." : redact(error.message);
+    }
+    // A local item is only a presence signal, never proof of a valid session.
+    // It is independent of whether the optional CLI is missing, broken, or usable.
+    if (credentialOnly && !signal?.aborted && !closed) {
+      try { status.credentialPresent = await readCredentialPresence(provider.credentialTarget, signal); }
+      catch (error) {
+        if (error.name === "AbortError") status.error = "Status check cancelled.";
+      }
     }
     return status;
   }
@@ -985,8 +1006,10 @@ export function createAgentRuntime(options = {}) {
     if (closing) return closing;
     closed = true;
     const owned = [...processes];
+    const checking = [...credentialChecks];
+    for (const entry of checking) entry.controller.abort();
     for (const entry of owned) entry.stop(abortError("The manager closed; its services were stopped."));
-    closing = Promise.allSettled(owned.map((entry) => entry.finished)).then(() => undefined);
+    closing = Promise.allSettled([...owned, ...checking].map((entry) => entry.finished)).then(() => undefined);
     return closing;
   }
 

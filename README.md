@@ -18,7 +18,7 @@ Clau-dex 是一款 Windows 桌面應用，讓 Codex CLI 與 Claude Code CLI 共�
 - **圖片輸入**：支援貼上、選檔、拖放與圖片續問。
 - **觀察面板**：查看 CLI 狀態、用量、對話進度、Token 統計與程序資訊。
 - **桌面 App 管理**：查看 Codex、Claude 與 Antigravity App 的狀態，並管理由本程式啟動的 App。
-- **引導式登入**：CLI 未登入時，可以在 App 管理或聊天室按「登入」。程式會開啟該 CLI 官方的登入視窗，你在瀏覽器完成授權後，畫面會自動更新。憑證由 CLI 自行保存，Bridge 不會讀取。
+- **引導式登入**：Codex／Claude 由 CLI 開啟官方登入流程，完成授權後更新狀態。Antigravity 一律開啟 App 登入，並保留重新登入入口；Bridge 只觀察本機憑證項目是否存在，不讀取其內容，也不把項目存在當作有效帳號驗證。
 - **Codex MCP 整合**：提供 `check_bridge` 與 `delegate_to_claude` 工具。
 
 ## 系統需求
@@ -34,7 +34,7 @@ codex login
 claude auth login
 ```
 
-Antigravity（Google）目前只在 App 管理中顯示桌面 App 狀態與登入狀態，還不能接聊天室任務。登入狀態的判斷方式是檢查 Windows 認證管理員中有沒有名為 `gemini:antigravity` 的項目，只看名稱，不讀取內容。接任務需要 `agy` CLI，目前尚未完成驗證。
+Antigravity（Google）目前只支援桌面 App 管理與登入引導，還不能接聊天室任務。Bridge 以三態顯示 Windows 認證管理員的 `gemini:antigravity` 項目：已偵測、未偵測或無法確認；項目存在不代表 session 仍有效。不論是否安裝 `agy`，登入都會開啟 Antigravity App，已有項目時也能重新登入。`agy` 的任務執行整合尚未完成驗證，安裝 CLI 不會自動啟用聊天室任務。詳見 [Antigravity 啟動與登入排查](docs/antigravity-startup.md)。
 
 ## 安裝與啟動
 
@@ -116,7 +116,8 @@ Codex MCP 的工具逾時為 660 秒。桌面聊天室中的一般任務最長�
 ## 疑難排解
 
 - **CLI 顯示尚不可用**：觀察面板的「系統」頁會顯示實際 CLI 路徑與錯誤。程式會先檢查啟動環境的 PATH，再搜尋 Windows 常見安裝位置。若設定 `AGENT_HUB_CODEX_COMMAND`、`AGENT_HUB_CLAUDE_COMMAND` 或 `AGENT_HUB_ANTIGRAVITY_COMMAND`，指定指令會優先使用；若找不到，不會改用其他安裝。
-- **按「登入」後畫面沒有更新**：完成瀏覽器授權後，若登入視窗沒有自動關閉，請手動關閉。程式最多等待 5 分鐘；逾時後可以按重新整理，或再登入一次。
+- **按「登入」後畫面沒有更新**：Codex／Claude 完成瀏覽器授權後，若登入視窗沒有自動關閉，請手動關閉。Antigravity 請在 App 內確認帳號；Bridge 只能偵測憑證項目，不驗證其有效性。等待期間會監看 App 根程序身分，若 App 中途結束會回報原因，不必等到 5 分鐘逾時。完整操作見 [Antigravity 啟動與登入排查](docs/antigravity-startup.md)。
+- **Antigravity 啟動後立即結束或出現 GPU 錯誤**：先備份 ACL，依同版本、同參數進行權限對照；不要僅憑舊 dump 或錯誤文字就認定是 ESET／驅動。已驗證的限定範圍修復與復原方式見 [排查文件](docs/antigravity-startup.md)。
 - **連接埠 47931 已被占用**：先關閉另一個管理器，再重新啟動。
 - **MCP 工具沒有出現在 Codex**：確認管理器正在執行，並在 `setup.ps1` 完成後重新啟動 Codex。
 
@@ -135,6 +136,7 @@ npm run check
 | `npx electron test/electron-chat-features-smoke.mjs` | 剪貼簿貼圖、選檔、拖放、圖片續問與對話刪除 |
 | `npx electron test/electron-usage-smoke.mjs` | 用量面板在正常、零值、不完整及缺少資料時的顯示 |
 | `npx electron test/electron-cli-smoke.mjs` | CLI 可用狀態與畫面；不會發出模型請求 |
+| `npx electron test/electron-auth-state-smoke.mjs` | 憑證三態、重新登入入口、App 晚退出與登入等待結束；使用可控狀態，不會發出模型請求 |
 | `npx electron test/electron-cli-live-smoke.mjs` | 使用真實 Codex／Claude CLI 各發出一則模型請求 |
 
 最後一項 smoke 檢查會使用真實帳號並消耗用量，僅在需要時手動執行，不包含於 `npm test`。
@@ -144,6 +146,10 @@ npm run check
 - [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 - [Codex 非互動執行](https://learn.chatgpt.com/docs/non-interactive-mode)
 - [Claude Code CLI](https://code.claude.com/docs/en/cli-reference)
+
+## 版本紀錄
+
+各版本的變更與已知限制見 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 授權
 

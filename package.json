@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-bridge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Windows desktop manager for coordinating Codex and Claude Code CLI workflows.",
   "private": true,
   "type": "module",
@@ -16,7 +16,7 @@
     "start": "node src/server.js",
     "desktop": "electron .",
     "check": "node scripts/check.js",
-    "test": "node --test test/cli-discovery.test.js test/bridge.test.js test/runtime.test.js test/tasks.test.js test/app-manager.test.js test/http.test.js test/conversations.test.js test/attachments.test.js test/usage.test.js test/dispatch.test.js test/claude-quota.test.js test/providers.test.js"
+    "test": "node --test test/cli-discovery.test.js test/bridge.test.js test/runtime.test.js test/tasks.test.js test/app-manager.test.js test/http.test.js test/conversations.test.js test/attachments.test.js test/usage.test.js test/dispatch.test.js test/claude-quota.test.js test/providers.test.js test/credential-state.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

@@ -4,6 +4,8 @@ import { PROVIDER_IDS, PROVIDERS } from "./providers.js";
 
 const APP_IDS = PROVIDER_IDS;
 const APP_NAMES = Object.fromEntries(APP_IDS.map((id) => [id, PROVIDERS[id].appName]));
+// A short process-survival check; it does not prove that the app's UI is ready.
+const STARTUP_SETTLE_MS = 3000;
 const INVENTORY_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -30,12 +32,40 @@ $apps = @($apps | ForEach-Object {
   }
   if ($rank) { [pscustomobject]@{ Name = $_.Name; AppID = $_.AppID; Rank = $rank; Index = $index } }
 } | Sort-Object @{ Expression = 'Rank'; Descending = $true }, Index | Select-Object Name, AppID)
+function Test-BridgeNodeHost([string]$commandLine) {
+  # Keep command-line values local. Only the role bit goes back to the manager.
+  # A .js filename alone is not evidence: GUI apps can open JavaScript files.
+  $commandTokens = @([regex]::Matches($commandLine, '(?:[^\s"]+|"[^"]*")+') | ForEach-Object { $_.Value.Trim('"') })
+  foreach ($commandToken in ($commandTokens | Select-Object -Skip 1)) {
+    if ($commandToken -eq '--') { break }
+    if ($commandToken -match '^(?:--(?:import|require|eval|input-type)(?:=|$)|-(?:r|e)(?:=|$)|--ms-enable-electron-run-as-node(?:=|$))') { return $true }
+  }
+  return $false
+}
+# Sidecars can re-run the app executable through helpers (app -> language server -> cmd -> app).
+# Only PIDs travel back; a parent created after its child is a reused PID and ends the walk.
+$tree = @{}
+Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate | ForEach-Object { $tree[[int]$_.ProcessId] = $_ }
+function Get-BridgeAncestors($process) {
+  $chain = New-Object System.Collections.Generic.List[int]
+  $current = $process
+  for ($depth = 0; $depth -lt 12; $depth++) {
+    $parent = $tree[[int]$current.ParentProcessId]
+    if (-not $parent -or $chain.Contains([int]$parent.ProcessId) -or [int]$parent.ProcessId -eq [int]$process.ProcessId) { break }
+    if ($parent.CreationDate -and $current.CreationDate -and $parent.CreationDate -gt $current.CreationDate) { break }
+    $chain.Add([int]$parent.ProcessId); $current = $parent
+  }
+  return ,$chain.ToArray()
+}
 $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe' OR Name = 'Codex.exe' OR Name = 'Claude.exe' OR Name = 'Antigravity.exe'" | ForEach-Object {
   [ordered]@{
     pid = [int]$_.ProcessId
     parentPid = [int]$_.ParentProcessId
+    ancestors = Get-BridgeAncestors $_
     name = [string]$_.Name
     path = [string]$_.ExecutablePath
+    type = [regex]::Match([string]$_.CommandLine, '(?:^|\s)"?--type=([^\s"]+)').Groups[1].Value
+    nodeHost = Test-BridgeNodeHost ([string]$_.CommandLine)
     created = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { '' }
   }
 })
@@ -111,6 +141,16 @@ function sameProcess(left, right) {
     && left.name.toLowerCase() === right.name.toLowerCase();
 }
 
+// Older controlled snapshots omit nodeHost; preserve that compatibility while
+// excluding positively identified Node hosts and Chromium child processes.
+function guiProcess(item) { return !item.type && item.nodeHost !== true; }
+
+// A root has no GUI process of the same app anywhere above it. Older snapshots only carry parentPid.
+function rootProcess(item, guiPids) {
+  const ancestors = Array.isArray(item.ancestors) ? item.ancestors : [item.parentPid];
+  return !ancestors.some((pid) => guiPids.has(pid));
+}
+
 function errorMessage(error) {
   const detail = String(error?.stderr || error?.message || error).trim();
   return detail || "Unable to manage the desktop application.";
@@ -121,6 +161,7 @@ export function createAppManager({
   platform = process.platform,
   execFile = nodeExecFile,
   spawn = nodeSpawn,
+  startupSettleMs = STARTUP_SETTLE_MS,
 } = {}) {
   const owned = new Map(APP_IDS.map((id) => [id, new Map()]));
   const launchers = new Map();
@@ -135,6 +176,18 @@ export function createAppManager({
 
   function requireId(id) {
     if (!APP_IDS.includes(id)) throw new Error(`Unknown app. Choose ${APP_IDS.join(", ")}.`);
+  }
+
+  function pause(milliseconds) {
+    return new Promise((resolve, reject) => {
+      requireActive();
+      const timer = setTimeout(() => { pendingCancellations.delete(cancel); resolve(); }, milliseconds);
+      const cancel = () => {
+        clearTimeout(timer); pendingCancellations.delete(cancel);
+        reject(new Error("App manager is closed."));
+      };
+      pendingCancellations.add(cancel);
+    });
   }
 
   function execute(script, extraEnv = {}) {
@@ -196,9 +249,12 @@ export function createAppManager({
 
   function appInfo(id, snapshot, error = null) {
     const processes = snapshot.processes.filter((item) => validProcess(id, item));
+    const guiProcesses = processes.filter(guiProcess);
+    const pids = new Set(guiProcesses.map((item) => item.pid));
+    const roots = guiProcesses.filter((item) => rootProcess(item, pids));
     const currentOwned = owned.get(id);
     for (const [pid, expected] of currentOwned) {
-      if (!processes.some((item) => sameProcess(expected, item))) currentOwned.delete(pid);
+      if (!processes.some((item) => guiProcess(item) && sameProcess(expected, item))) currentOwned.delete(pid);
     }
     const registration = snapshot.apps.find((item) => knownAppId(id, item.AppID));
     const appPath = processes[0]?.path;
@@ -212,9 +268,10 @@ export function createAppManager({
     const launcher = launchers.get(id) || {};
     return {
       installed: Boolean(launcher.appId || launcher.path),
-      running: processes.length > 0,
+      running: roots.length > 0,
       managed: currentOwned.size > 0,
       pids: processes.map((item) => item.pid),
+      rootProcesses: roots.map(({ pid, created }) => ({ pid, created })),
       ...launcher,
       error,
     };
@@ -276,17 +333,24 @@ export function createAppManager({
       let latest = before;
       do {
         latest = await inventory();
+        requireActive();
         const candidates = latest.processes.filter((item) => validProcess(id, item));
-        if (candidates.length) {
-          const candidatePids = new Set(candidates.map((item) => item.pid));
-          const roots = candidates.filter((item) => !candidatePids.has(item.parentPid)
-            && (directPid === null || item.pid === directPid));
-          for (const item of roots) owned.get(id).set(item.pid, { ...item });
-          return appInfo(id, latest, roots.length ? null : "The app opened, but its process ownership could not be confirmed.");
+        const guiCandidates = candidates.filter(guiProcess);
+        const candidatePids = new Set(guiCandidates.map((item) => item.pid));
+        const roots = guiCandidates.filter((item) => rootProcess(item, candidatePids)
+          && (directPid === null || item.pid === directPid));
+        if (roots.length) {
+          await pause(startupSettleMs);
+          latest = await inventory();
+          requireActive();
+          const survived = roots.filter((root) => latest.processes.some((item) => validProcess(id, item) && guiProcess(item) && sameProcess(root, item)));
+          if (!survived.length) return { ...appInfo(id, latest, "The app started but quit right away, or its process identity changed. Check the app's own logs."), running: false };
+          for (const item of survived) owned.get(id).set(item.pid, { ...item });
+          return appInfo(id, latest);
         }
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await pause(250);
       } while (Date.now() - startedAt < 6000);
-      return appInfo(id, latest, "Launch was requested, but no matching desktop app process was detected.");
+      return appInfo(id, latest, "Launch was requested, but the app was not seen running. It may have quit right away on startup; check the app's own logs.");
     });
   }
 

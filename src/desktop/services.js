@@ -29,8 +29,9 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
   const unknown = { available: false, authenticated: null, version: "", error: "正在檢查連線" };
   let agents = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { ...unknown }]));
   let apps = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { installed: false, running: false, managed: false, pids: [] }]));
-  // Guided sign-in per agent: { state: "pending" | "failed", message, startedAt }. Cleared once the CLI reports signed in.
+  // A credential marker is not verified authentication. App-only re-login may be opened without a completion claim.
   const logins = new Map();
+  const loginControllers = new Set();
   let shuttingDown = false; let closed = null; let refreshing = null; let usageRefreshing = null; let timer = null;
   let quotaRefreshing = null; let quotaController = null; let lastQuotaAttempt = 0;
   const taskManager = createTaskManager({ store, runtime, onChange });
@@ -67,7 +68,10 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
       if (!shuttingDown) {
         if (results[0].status === "fulfilled") agents = results[0].value;
         else agents = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { ...unknown, error: results[0].reason.message }]));
-        for (const id of PROVIDER_IDS) if (agents[id]?.authenticated && logins.get(id)?.state === "failed") logins.delete(id);
+        for (const id of PROVIDER_IDS) {
+          const observed = PROVIDERS[id].signInWith === "app" ? agents[id]?.credentialPresent === true : agents[id]?.authenticated === true;
+          if (observed && logins.get(id)?.state === "failed") logins.delete(id);
+        }
         if (results[1].status === "fulfilled") apps = results[1].value;
         if (refreshQuota) refreshClaudeQuota({ force: true }).catch(() => {});
         onChange();
@@ -127,43 +131,104 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
     if (changes.closeLaunchedApps !== undefined && typeof changes.closeLaunchedApps !== "boolean") throw new Error("無效的關閉設定。");
     settings = store.saveSettings({ ...settings, ...changes }); onChange(); return settings;
   }
-  /**
-   * Opens the agent CLI's own sign-in console and waits, polling only that agent, until the CLI reports it is
-   * signed in, the console closes, or the wait times out. Bridge never sees the credentials.
-   */
+  function waitForLoginPoll(signal) {
+    return new Promise((resolve) => {
+      if (signal.aborted) { resolve(false); return; }
+      const complete = (active) => { clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(active); };
+      const abort = () => complete(false);
+      const timer = setTimeout(() => complete(true), loginPollMs);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  /** Open the provider's own sign-in UI. Bridge observes process/credential state, never credential contents. */
   async function loginAgent(id) {
     if (shuttingDown) throw new Error("管理器正在關閉。");
     if (!PROVIDER_IDS.includes(id)) throw new Error("無效的 AI。");
-    if (logins.get(id)?.state === "pending") throw new Error(`${PROVIDERS[id].appName} 的登入視窗已經開啟，請在瀏覽器完成授權。`);
-    if (!agents[id]?.available) throw new Error(`${PROVIDERS[id].appName} CLI 尚未安裝或無法執行，無法從這裡登入。`);
-    const session = await runtime.login(id);
-    const login = { state: "pending", message: "已開啟登入視窗，請在瀏覽器完成授權。", startedAt: new Date().toISOString() };
-    logins.set(id, login); onChange();
+    const viaApp = PROVIDERS[id].signInWith === "app";
+    if (logins.get(id)?.state === "pending") throw new Error(`${PROVIDERS[id].appName} 的登入視窗已經開啟，請在${viaApp ? " App 內完成登入" : "瀏覽器完成授權"}。`);
+    if (!viaApp && !agents[id]?.available) throw new Error(`${PROVIDERS[id].appName} CLI 尚未安裝或無法執行，無法從這裡登入。`);
+    const markerBefore = agents[id]?.credentialPresent;
+    const login = { state: "pending", message: viaApp ? `正在開啟 ${PROVIDERS[id].appName} 登入介面…` : "正在開啟登入視窗…", startedAt: new Date().toISOString() };
+    const controller = new AbortController();
+    const active = () => !shuttingDown && !controller.signal.aborted && logins.get(id) === login;
+    const cleanup = () => { loginControllers.delete(controller); controller.abort(); };
+    // Reserve before awaiting launch so concurrent callers cannot open duplicate sign-in windows.
+    logins.set(id, login); loginControllers.add(controller); onChange();
+    let session;
+    let expectedRoots = null;
+    try {
+      if (viaApp) {
+        const app = await launchApp(id);
+        if (!active()) throw new Error("管理器正在關閉，登入已停止。");
+        if (!app.running) throw new Error(`無法開啟 ${PROVIDERS[id].appName}：${app.error || "沒有偵測到執行中的 App。"}`);
+        expectedRoots = Array.isArray(app.rootProcesses) && app.rootProcesses.length ? app.rootProcesses.map((item) => ({ ...item })) : null;
+        if (markerBefore === true) {
+          const opened = { ...login, state: "opened", message: `已開啟 ${PROVIDERS[id].appName}，請在 App 內確認帳號或重新登入。已偵測到的憑證不代表登入仍有效。` };
+          logins.set(id, opened); cleanup(); onChange();
+          return { id, login: { ...opened } };
+        }
+        login.message = `已開啟 ${PROVIDERS[id].appName}，請在 App 內完成 Google 登入。`;
+      } else {
+        session = await runtime.login(id);
+        if (!active()) throw new Error("管理器正在關閉，登入已停止。");
+        login.message = "已開啟登入視窗，請在瀏覽器完成授權。";
+      }
+    } catch (error) {
+      if (logins.get(id) === login) logins.delete(id);
+      cleanup(); onChange(); throw error;
+    }
+    onChange();
     let consoleClosed = false;
-    session.exited.then(() => { consoleClosed = true; });
+    session?.exited?.then(() => { consoleClosed = true; }, () => { consoleClosed = true; });
     const deadline = Date.now() + loginTimeoutMs;
     (async () => {
       let closedChecks = 0;
-      while (!shuttingDown && logins.get(id) === login) {
-        await new Promise((resolve) => setTimeout(resolve, loginPollMs));
-        if (shuttingDown || logins.get(id) !== login) return;
-        let status;
-        try { status = await runtime.probeAgent(id); } catch { status = null; }
+      let inventoryFailures = 0;
+      while (active()) {
+        if (!await waitForLoginPoll(controller.signal) || !active()) return;
+        const results = await Promise.allSettled([
+          runtime.probeAgent(id, controller.signal),
+          viaApp ? appManager.list() : Promise.resolve(null),
+        ]);
+        if (!active()) return;
+        const status = results[0].status === "fulfilled" ? results[0].value : null;
         if (status) agents = { ...agents, [id]: status };
-        if (status?.authenticated) {
+        if (viaApp && results[1].status === "fulfilled" && results[1].value) apps = { ...apps, ...results[1].value };
+        if (viaApp ? status?.credentialPresent === true : status?.authenticated === true) {
           logins.delete(id); onChange();
           if (id === "claude") refreshClaudeQuota({ force: true }).catch(() => {});
           return;
         }
-        // The CLI may save credentials just after its console closes; give it one more check.
-        if (consoleClosed && ++closedChecks > 1) { logins.set(id, { ...login, state: "failed", message: "登入視窗已關閉，但尚未偵測到登入。可以再試一次。" }); onChange(); return; }
-        if (Date.now() > deadline) { logins.set(id, { ...login, state: "failed", message: "等待登入逾時。完成授權後按重新整理，或再試一次。" }); onChange(); return; }
+        const observedApp = viaApp && results[1].status === "fulfilled" ? results[1].value?.[id] : null;
+        if (viaApp && (results[1].status === "rejected" || observedApp?.error)) inventoryFailures++; else inventoryFailures = 0;
+        if (inventoryFailures > 1) {
+          logins.set(id, { ...login, state: "failed", message: `無法確認 ${PROVIDERS[id].appName} 程序是否仍在執行，請重新整理或重試。` }); onChange(); return;
+        }
+        const rootsGone = expectedRoots && Array.isArray(observedApp?.rootProcesses)
+          && !expectedRoots.some((expected) => observedApp.rootProcesses.some((item) => item.pid === expected.pid && item.created === expected.created));
+        const appClosed = observedApp && !observedApp.error && (observedApp.running === false || rootsGone);
+        if (viaApp ? appClosed : consoleClosed) closedChecks++; else closedChecks = 0;
+        // Give the provider one final check in case it saves a marker as its UI closes.
+        if (closedChecks > 1) {
+          const message = viaApp ? `${PROVIDERS[id].appName} 已結束，但尚未偵測到新的登入憑證。請重新開啟 App；若持續發生，請查看 App 日誌。`
+            : "登入視窗已關閉，但尚未偵測到登入。可以再試一次。";
+          logins.set(id, { ...login, state: "failed", message }); onChange(); return;
+        }
+        if (Date.now() > deadline) { logins.set(id, { ...login, state: "failed", message: viaApp ? "等待登入逾時，尚無法確認登入憑證。請在 App 內確認帳號後重試。" : "等待登入逾時。完成授權後按重新整理，或再試一次。" }); onChange(); return; }
         onChange();
       }
-    })().catch(() => {});
+    })().catch(() => {
+      if (active()) { logins.set(id, { ...login, state: "failed", message: "無法持續確認登入狀態，請重新整理或重試。" }); onChange(); }
+    }).finally(cleanup);
     return { id, login: { ...login } };
   }
-  async function launchApp(id) { if (shuttingDown) throw new Error("管理器正在關閉。"); apps = { ...apps, [id]: await appManager.launch(id) }; onChange(); return apps[id]; }
+  async function launchApp(id) {
+    if (shuttingDown) throw new Error("管理器正在關閉。");
+    const launched = await appManager.launch(id);
+    if (shuttingDown) throw new Error("管理器正在關閉。");
+    apps = { ...apps, [id]: launched }; onChange(); return apps[id];
+  }
   async function closeApp(id) { apps = { ...apps, [id]: await appManager.close(id) }; onChange(); return apps[id]; }
   function createConversation(input = {}) {
     if (shuttingDown) throw new Error("管理器正在關閉，無法建立對話。");
@@ -223,6 +288,8 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
   function shutdown() {
     if (closed) return closed;
     shuttingDown = true; clearInterval(timer); onChange();
+    for (const controller of loginControllers) controller.abort();
+    logins.clear();
     quotaController?.abort();
     closed = (async () => {
       // The usage scan is read-only, so shutdown does not wait for it.
