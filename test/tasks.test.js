@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
@@ -80,4 +80,69 @@ test("recovery preserves unfinished jobs owned by a live process", () => {
   store.update(task.id, { status: "running" });
   store.recoverInterrupted();
   assert.equal(store.get(task.id).status, "running");
+});
+
+const defaultAgents = { participants: ["codex", "claude"], coordinator: "codex", effort: { codex: "auto", claude: "auto" } };
+
+test("settings default to Codex + Claude and keep old settings when migrating", () => {
+  const data = path.join(root, "settings-migrate");
+  assert.deepEqual(createTaskStore(data).loadSettings({ workspace }), { workspace, closeLaunchedApps: false, agentDefaults: defaultAgents });
+  writeFileSync(path.join(data, "settings.json"), JSON.stringify({ workspace: "C:\old", closeLaunchedApps: true }), "utf8");
+  const store = createTaskStore(data);
+  const loaded = store.loadSettings({ workspace });
+  assert.deepEqual(loaded, { workspace: "C:\old", closeLaunchedApps: true, agentDefaults: defaultAgents });
+  assert.deepEqual(store.saveSettings({ workspace: "C:\old", closeLaunchedApps: true }), loaded);
+});
+
+test("agent defaults survive a save and reload", () => {
+  const data = path.join(root, "settings-roundtrip");
+  const cases = [
+    { participants: ["antigravity", "claude", "codex"], coordinator: "claude", effort: { codex: "high", claude: "max" } },
+    { participants: ["antigravity"], coordinator: "codex", effort: { codex: "auto", claude: "auto" } },
+  ];
+  for (const agentDefaults of cases) {
+    const saved = createTaskStore(data).saveSettings({ workspace, closeLaunchedApps: true, agentDefaults });
+    const reloaded = createTaskStore(data).loadSettings();
+    assert.deepEqual(reloaded, saved);
+    assert.equal(reloaded.workspace, workspace);
+    assert.equal(reloaded.closeLaunchedApps, true);
+  }
+  // Participants are stored in registry order, the coordinator must be a participant, and effort is completed.
+  const store = createTaskStore(data);
+  const normalized = store.saveSettings({ workspace, agentDefaults: { participants: ["claude", "antigravity"], coordinator: "codex", effort: { codex: "low" } } });
+  assert.deepEqual(normalized.agentDefaults, { participants: ["claude", "antigravity"], coordinator: "claude", effort: { codex: "low", claude: "auto" } });
+  assert.deepEqual(JSON.parse(readFileSync(path.join(data, "settings.json"), "utf8")), normalized);
+});
+
+test("saving rejects invalid agent defaults without overwriting settings", () => {
+  const data = path.join(root, "settings-invalid");
+  const store = createTaskStore(data);
+  const kept = store.saveSettings({ workspace, closeLaunchedApps: true, agentDefaults: { participants: ["claude"], coordinator: "claude" } });
+  for (const agentDefaults of [
+    { participants: [] }, { participants: ["codex", "unknown"] }, { participants: ["codex", "codex"] }, { participants: "codex" },
+    { participants: ["claude"], coordinator: "antigravity" }, { participants: ["claude"], coordinator: "unknown" },
+    { effort: { codex: "extreme" } }, { effort: "high" }, null, ["codex"], "codex",
+  ]) {
+    assert.throws(() => store.saveSettings({ workspace, agentDefaults }), undefined, JSON.stringify(agentDefaults));
+  }
+  assert.deepEqual(createTaskStore(data).loadSettings(), kept);
+});
+
+test("malformed persisted settings fall back to safe defaults per field", () => {
+  const data = path.join(root, "settings-malformed");
+  const file = path.join(data, "settings.json");
+  createTaskStore(data);
+  for (const content of ["{not json", "null", "[]", "\"text\""]) {
+    writeFileSync(file, content, "utf8");
+    assert.deepEqual(createTaskStore(data).loadSettings({ workspace }), { workspace, closeLaunchedApps: false, agentDefaults: defaultAgents });
+  }
+  writeFileSync(file, JSON.stringify({ workspace: "C:\kept", closeLaunchedApps: true,
+    agentDefaults: { participants: ["unknown"], coordinator: 5, effort: { codex: "extreme" } } }), "utf8");
+  assert.deepEqual(createTaskStore(data).loadSettings(), { workspace: "C:\kept", closeLaunchedApps: true, agentDefaults: defaultAgents });
+  writeFileSync(file, JSON.stringify({ agentDefaults: { participants: ["antigravity", "claude"], coordinator: "codex", effort: "bad" } }), "utf8");
+  assert.deepEqual(createTaskStore(data).loadSettings().agentDefaults, { participants: ["claude", "antigravity"], coordinator: "claude", effort: defaultAgents.effort });
+  writeFileSync(file, JSON.stringify({ agentDefaults: { participants: [], effort: { claude: "high" } } }), "utf8");
+  assert.deepEqual(createTaskStore(data).loadSettings().agentDefaults, { ...defaultAgents, effort: { codex: "auto", claude: "high" } });
+  writeFileSync(file, JSON.stringify({ agentDefaults: [] }), "utf8");
+  assert.deepEqual(createTaskStore(data).loadSettings().agentDefaults, defaultAgents);
 });

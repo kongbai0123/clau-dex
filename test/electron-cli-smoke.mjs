@@ -47,13 +47,14 @@ async function main() {
     const chips = await js("Array.from(document.querySelectorAll('[data-participant]')).map(el=>({id:el.dataset.participant,selected:el.classList.contains('selected'),disabled:el.disabled}))");
     assert.deepEqual(chips.map(chip=>chip.id), ['codex','claude','antigravity']);
     assert.deepEqual(chips.filter(chip=>chip.selected).map(chip=>chip.id), ['codex','claude']);
-    assert.equal(chips.find(chip=>chip.id==='antigravity').disabled, true);
+    assert.equal(chips.find(chip=>chip.id==='antigravity').disabled, false);
     writeFileSync(path.join(artifacts, 'options.png'), (await window.webContents.capturePage()).toPNG());
     await js("document.querySelector('#chat-options').open=false");
     // Item presence is observable, but does not verify the account session. Remain portable across machines.
     assert.equal(report.agents.antigravity.authenticated, null);
     assert.equal(report.agents.antigravity.authSource, 'credential-entry');
     await js("document.querySelector('.nav-item[data-view=apps]').click()");
+    await js("document.querySelector('[data-agent-details=antigravity]').click()");
     await until(()=>js("Array.from(document.querySelectorAll('.app-card')).some(card=>card.textContent.includes('Antigravity')&&card.textContent.includes('憑證'))"),'Antigravity card did not show credential presence status.');
     report.loginButtons = await js("Array.from(document.querySelectorAll('[data-login-agent]')).map(el=>el.dataset.loginAgent)");
     assert.deepEqual(report.loginButtons, ['antigravity'], 'App-owned sign-in must retain a way to open/re-authenticate even with a stored marker.');

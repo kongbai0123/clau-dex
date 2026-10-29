@@ -33,6 +33,7 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
   const logins = new Map();
   const loginControllers = new Set();
   let shuttingDown = false; let closed = null; let refreshing = null; let usageRefreshing = null; let timer = null;
+  let agentsCheckedAt = null;
   let quotaRefreshing = null; let quotaController = null; let lastQuotaAttempt = 0;
   const taskManager = createTaskManager({ store, runtime, onChange });
   const bridge = createHttpBridge({ runtime, taskManager, workspaceHint: null, port, onChange });
@@ -41,7 +42,7 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
     const usage = usageMonitor.get() || {};
     return {
       agents: Object.fromEntries(Object.entries(agents).map(([id, agent]) => [id, logins.has(id) ? { ...agent, login: { ...logins.get(id) } } : agent])),
-      providers: providerSummaries(), apps, settings: { ...settings }, bridge: bridge.getStatus(), shuttingDown,
+      providers: providerSummaries(), apps, settings: structuredClone(settings), bridge: bridge.getStatus(), shuttingDown, agentsCheckedAt,
       usage: { ...usage, claude: { ...(usage.claude || {}), ...quotaCache.snapshot() } },
       conversations: conversationStore.list(allTasks),
       tasks: store.list().map(task => {
@@ -68,6 +69,7 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
       if (!shuttingDown) {
         if (results[0].status === "fulfilled") agents = results[0].value;
         else agents = Object.fromEntries(PROVIDER_IDS.map((id) => [id, { ...unknown, error: results[0].reason.message }]));
+        agentsCheckedAt = new Date().toISOString();
         for (const id of PROVIDER_IDS) {
           const observed = PROVIDERS[id].signInWith === "app" ? agents[id]?.credentialPresent === true : agents[id]?.authenticated === true;
           if (observed && logins.get(id)?.state === "failed") logins.delete(id);
@@ -127,9 +129,10 @@ export function createDesktopServices({ projectRoot, dataDirectory = path.join(p
   }
   function updateSettings(changes) {
     if (shuttingDown) throw new Error("管理器正在關閉。");
+    if (!changes || typeof changes !== "object" || Array.isArray(changes)) throw new Error("無效的設定。");
     if (changes.workspace !== undefined && typeof changes.workspace !== "string") throw new Error("無效的專案路徑。");
     if (changes.closeLaunchedApps !== undefined && typeof changes.closeLaunchedApps !== "boolean") throw new Error("無效的關閉設定。");
-    settings = store.saveSettings({ ...settings, ...changes }); onChange(); return settings;
+    settings = store.saveSettings({ ...settings, ...changes }); onChange(); return structuredClone(settings);
   }
   function waitForLoginPoll(signal) {
     return new Promise((resolve) => {

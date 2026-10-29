@@ -52,7 +52,7 @@ async function main() {
     const png = await js("(()=>{const c=document.createElement('canvas');c.width=200;c.height=130;const p=c.getContext('2d');p.fillStyle='white';p.fillRect(0,0,200,130);p.fillStyle='#e53935';p.beginPath();p.arc(55,65,30,0,Math.PI*2);p.fill();p.fillStyle='#1565c0';p.fillRect(115,35,60,60);return c.toDataURL('image/png')})()");
     report.imageFile = path.join(data, 'vision.png'); writeFileSync(report.imageFile, Buffer.from(png.split(',')[1], 'base64'));
     // Native clipboard and actual Ctrl+V exercise the browser paste path.
-    originalClipboard = await Promise.all((await clipboard.read()).map(async item => new ClipboardItem(Object.fromEntries(await Promise.all(item.types.map(async type=>[type, await item.getType(type)]))))));
+    originalClipboard = await Promise.all((await clipboard.read()).filter(item => item.types.length > 0).map(async item => new ClipboardItem(Object.fromEntries(await Promise.all(item.types.map(async type=>[type, await item.getType(type)]))))));
     await clipboard.write([new ClipboardItem({ 'image/png': new Blob([Buffer.from(png.split(',')[1], 'base64')], { type: 'image/png' }) })]);
     report.clipboard = { hasPng: await clipboard.has('image/png'), types: (await clipboard.read()).flatMap(item=>item.types) };
     window.focus(); window.webContents.focus();
@@ -84,6 +84,16 @@ async function main() {
     await js("document.querySelector('.message-images').scrollIntoView({block:'center'})"); await pause(150);
     writeFileSync(path.join(artifacts, 'image-chat.png'), (await window.webContents.capturePage()).toPNG());
     const firstRoom = imageTask.conversationId;
+    // A text-only follow-up still carries the room's earlier images. Gate it before IPC for Antigravity.
+    const beforeBlocked = services.store.listAll().length;
+    await js("document.querySelector('#chat-options').open=true;document.querySelector('[data-participant=antigravity]').click();document.querySelector('#chat-options').open=false");
+    await enterText('純文字續問，但前文仍有圖片。');
+    assert.equal(await js("document.querySelector('#submit-task').disabled"), true);
+    assert.equal(await js("document.querySelector('#composer-error').textContent.includes('前文含圖片')"), true);
+    await js("document.querySelector('#submit-task').click()");
+    assert.equal(services.store.listAll().length, beforeBlocked, 'Blocked image history must not create a failed user task.');
+    await js("document.querySelector('#chat-options').open=true;document.querySelector('[data-participant=antigravity]').click();document.querySelector('#chat-options').open=false");
+    report.checks.push('Antigravity rejects image history before sending a new text-only follow-up');
     // Drop a picture in a new room and send without text.
     await click('#new-conversation'); await until(() => js("document.querySelectorAll('[data-message-role]').length===0"), 'New chat did not open.');
     await js(`(()=>{const bytes=Uint8Array.from(atob(${JSON.stringify(png.split(',')[1])}),c=>c.charCodeAt(0));const transfer=new DataTransfer();transfer.items.add(new File([bytes],'dropped.png',{type:'image/png'}));document.querySelector('#view-workspace').dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}))})()`);
@@ -112,6 +122,22 @@ async function main() {
     assert.ok(services.snapshot().conversations.some(room=>room.id===imageOnly.conversationId));
     assert.equal(await js("document.querySelectorAll('#chat-messages [data-message-role]').length"), 0);
     report.checks.push('History and sidebar delete remove durable records and private images; running deletion awaits owned process cleanup and preserves other rooms');
+    // The empty room, effort section and takeover note follow whichever AIs are selected.
+    const team = ids => js(`(()=>{const want=${JSON.stringify(ids)};const chip=id=>document.querySelector('[data-participant='+id+']');for(const id of want)if(!chip(id).classList.contains('selected'))chip(id).click();let other;while((other=Array.from(document.querySelectorAll('[data-participant].selected')).find(el=>!want.includes(el.dataset.participant))))other.click();})()`);
+    const view = () => js("({welcome:Array.from(document.querySelectorAll('.welcome-agent')).map(el=>el.className),text:document.querySelector('.chat-welcome p')?.textContent||'',effort:document.querySelector('#effort-description').textContent,rows:Array.from(document.querySelectorAll('[data-effort-row]')).filter(el=>!el.hidden).length,workflow:document.querySelector('#workflow-description').textContent})");
+    await team(['antigravity']); let shown = await view();
+    assert.deepEqual(shown.welcome, ['welcome-agent antigravity']); assert.match(shown.text, /Antigravity/); assert.doesNotMatch(shown.text, /Codex|Claude|接力/);
+    assert.equal(shown.rows, 0); assert.match(shown.effort, /^Antigravity 沿用 CLI 預設/);
+    await team(['codex', 'antigravity']); shown = await view();
+    assert.equal(shown.welcome.length, 2); assert.match(shown.text, /Codex 與 Antigravity/); assert.equal(shown.rows, 1); assert.match(shown.effort, /最左邊是「預設」.*Antigravity 沿用 CLI 預設/);
+    assert.match(shown.workflow, /任務會暫停/); assert.match(shown.workflow, /Antigravity 只承接執行步驟，不擔任統籌或複核/);
+    await team(['codex', 'claude', 'antigravity']); shown = await view();
+    assert.equal(shown.welcome.length, 3); assert.match(shown.workflow, /由 (Codex|Claude) 接手統籌與複核；Antigravity 只承接執行步驟/);
+    await pause(400); // let the view repaint before capturing
+    writeFileSync(path.join(artifacts, 'welcome-team.png'), (await window.webContents.capturePage()).toPNG());
+    await team(['codex']); shown = await view();
+    assert.match(shown.text, /Codex/); assert.doesNotMatch(shown.text, /接力/); assert.doesNotMatch(shown.workflow, /接手/); assert.doesNotMatch(shown.effort, /沿用 CLI 預設，暫不支援/);
+    report.checks.push('Empty-room welcome, effort note and takeover wording follow the selected AIs');
     writeFileSync(path.join(artifacts, 'after-delete.png'), (await window.webContents.capturePage()).toPNG());
     if(originalClipboard) await clipboard.write(originalClipboard); report.preClosePassed = true; window.close();
   } catch (error) { report.error = error.stack || error.message; if(instance&&!instance.window.isDestroyed())writeFileSync(path.join(artifacts,'failure.png'),(await instance.window.webContents.capturePage()).toPNG());writeFileSync(path.join(artifacts, 'report.json'), JSON.stringify(report, null, 2)); if(originalClipboard) await clipboard.write(originalClipboard).catch(()=>{}); if(instance) await instance.shutdown(); else {await runtime.close(); process.exitCode=1;} }

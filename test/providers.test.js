@@ -22,19 +22,20 @@ after(() => {
 });
 const quota = (usedPercent) => ({ primary: { usedPercent, resetsAt: new Date(Date.now() + 3_600_000).toISOString() } });
 
-test("the registry lists Antigravity for management only until its task runner is verified", () => {
+test("the registry enables Antigravity execution while keeping coordination with Codex and Claude", () => {
   assert.deepEqual(PROVIDER_IDS, ["codex", "claude", "antigravity"]);
   assert.deepEqual(COORDINATORS, ["codex", "claude"]);
-  assert.deepEqual(TASK_AGENTS, ["codex", "claude"]);
+  assert.deepEqual(TASK_AGENTS, ["codex", "claude", "antigravity"]);
 });
 
 test("participants come from an explicit list, else from the legacy workflow", () => {
   assert.deepEqual(normalizeParticipants(["claude", "codex", "claude"]), ["codex", "claude"]);
   assert.deepEqual(normalizeParticipants(undefined, "claude"), ["claude"]);
   assert.deepEqual(normalizeParticipants(undefined, "coordinated"), ["codex", "claude"]);
-  assert.deepEqual(normalizeParticipants(["antigravity"], "codex"), ["codex"]);
+  assert.deepEqual(normalizeParticipants(["antigravity"], "codex"), ["antigravity"]);
+  assert.deepEqual(validateParticipants(["antigravity"]), ["antigravity"]);
   assert.deepEqual(validateParticipants(["claude"]), ["claude"]);
-  for (const invalid of [[], ["antigravity"], ["codex", "codex"], ["unknown"], "codex"]) assert.throws(() => validateParticipants(invalid), /請至少選擇/);
+  for (const invalid of [[], ["codex", "codex"], ["unknown"], "codex"]) assert.throws(() => validateParticipants(invalid), /請至少選擇/);
   assert.equal(workflowFor(["claude"]), "claude");
   assert.equal(workflowFor(["codex", "claude"]), "coordinated");
 });
@@ -70,13 +71,16 @@ test("rooms store participants and older rooms derive them from their workflow",
   assert.equal(prepared.taskInput.coordinator, "claude");
 });
 
-test("Antigravity's CLI is found as agy on PATH and has no bundled fallback", () => {
+test("Antigravity's CLI is agy and never falls back to its desktop App", () => {
   const directory = path.join(root, "agy");
   const bin = path.join(directory, "bin");
   mkdirSync(bin, { recursive: true });
   writeFileSync(path.join(bin, "agy.exe"), "fixture only; not executed");
   const env = { PATH: bin, USERPROFILE: directory, APPDATA: directory, LOCALAPPDATA: directory, SystemRoot: directory };
   assert.deepEqual(resolveCliCommand("antigravity", { env, platform: "win32" }), { command: path.join(bin, "agy.exe"), args: [] });
+  const appFolder = path.join(directory, "Programs", "antigravity");
+  mkdirSync(appFolder, { recursive: true });
+  writeFileSync(path.join(appFolder, "Antigravity.exe"), "GUI fixture only; not executed");
   assert.deepEqual(resolveCliCommand("antigravity", { env: { ...env, PATH: "" }, platform: "win32" }), { command: "agy", args: [] });
 });
 

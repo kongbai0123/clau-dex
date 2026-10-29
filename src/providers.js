@@ -8,11 +8,11 @@
 //   credentialTarget: Windows Credential Manager target the CLI writes after sign-in, checked by name only.
 //   signInWith: "app" when the desktop app owns sign-in, so Bridge opens the app instead of a CLI console.
 export const PROVIDERS = Object.freeze({
-  codex: Object.freeze({ id: "codex", name: "Codex", appName: "Codex", cli: "codex", coordinate: true, tasks: true,
+  codex: Object.freeze({ id: "codex", name: "Codex", appName: "Codex", cli: "codex", coordinate: true, tasks: true, images: true,
     login: ["login"], status: ["login", "status"] }),
-  claude: Object.freeze({ id: "claude", name: "Claude", appName: "Claude Code", cli: "claude", coordinate: true, tasks: true,
+  claude: Object.freeze({ id: "claude", name: "Claude", appName: "Claude Code", cli: "claude", coordinate: true, tasks: true, images: true,
     login: ["auth", "login"], status: ["auth", "status", "--json"] }),
-  antigravity: Object.freeze({ id: "antigravity", name: "Antigravity", appName: "Antigravity", cli: "agy", coordinate: false, tasks: false,
+  antigravity: Object.freeze({ id: "antigravity", name: "Antigravity", appName: "Antigravity", cli: "agy", coordinate: false, tasks: true, images: false,
     // agy has no documented login or status command: an interactive session starts Google sign-in.
     // The desktop app runs the same Google sign-in and writes the same credential, so it works without agy.
     login: [], status: null, credentialTarget: "gemini:antigravity", signInWith: "app" }),
@@ -27,7 +27,7 @@ export function providerName(id) { return PROVIDERS[id]?.name ?? String(id); }
 /** What the renderer needs to draw agents, in display order. */
 export function providerSummaries() {
   return PROVIDER_IDS.map((id) => {
-    const { name, appName, cli, coordinate, tasks, signInWith = "cli" } = PROVIDERS[id];
-    return { id, name, appName, cli, coordinate, tasks, signInWith };
+    const { name, appName, cli, coordinate, tasks, images, signInWith = "cli" } = PROVIDERS[id];
+    return { id, name, appName, cli, coordinate, tasks, images, signInWith };
   });
 }

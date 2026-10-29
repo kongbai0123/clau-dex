@@ -12,6 +12,7 @@ import { PROVIDERS, PROVIDER_IDS, providerName } from "./providers.js";
 import { diffTrees, snapshotTree } from "./checkpoints.js";
 import { buildCliEnvironment, resolveCliCommand } from "./cli-discovery.js";
 import { createWindowsCredentialProbe } from "./credential-status.js";
+import { parseAntigravityResult } from "./antigravity-protocol.js";
 
 const MAX_CAPTURE_BYTES = 2_000_000;
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
@@ -458,6 +459,14 @@ export function createAgentRuntime(options = {}) {
       } else {
         status.available = true;
         status.version = `${agent} ${(`${version.stdout}\n${version.stderr}`).match(/\b\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?\b/)?.[0] ?? "unknown"}`;
+        if (agent === "antigravity") {
+          const help = await execute(agent, ["--help"], { limitMs: PROBE_TIMEOUT_MS, signal });
+          const flags = `${help.stdout}\n${help.stderr}`;
+          const supportedFlags = new Set(flags.match(/--[a-z][a-z-]*/g) || []);
+          status.available = help.exitCode === 0 && ["--input-format", "--output-format", "--print-timeout", "--mode", "--sandbox", "--disable-slash-commands"].every((flag) => supportedFlags.has(flag));
+          status.headless = status.available;
+          if (!status.available) status.error = "Antigravity CLI does not provide the required headless interface. Install or update the official agy CLI.";
+        }
         if (provider.status) {
           const auth = await execute(agent, provider.status, { limitMs: PROBE_TIMEOUT_MS, signal });
           if (agent === "claude") {
@@ -650,6 +659,21 @@ export function createAgentRuntime(options = {}) {
     return { output, stderr: redact(response.stderr), exitCode: response.exitCode, usage };
   }
 
+  async function runAntigravity({ workspace, prompt, mode }, { onProgress, signal } = {}) {
+    if (mode === "review") throw new Error("Antigravity 尚未支援工具層受限的唯讀複核；請選擇 Codex 或 Claude。");
+    const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`, "--mode", "accept-edits", "--sandbox", "--disable-slash-commands"];
+    const response = await execute("antigravity", args, { cwd: workspace,
+      input: JSON.stringify({ event: "user", message: { content: prompt } }) + "\n", onProgress, signal });
+    try {
+      const result = parseAntigravityResult(response.stdout, { exitCode: response.exitCode, stderr: response.stderr });
+      return { output: result.output, usage: result.usage, exitCode: response.exitCode, stderr: redact(response.stderr) };
+    } catch (error) {
+      error.message = redact(error.message);
+      error.stderr = redact(error.stderr);
+      throw error;
+    }
+  }
+
   const getQuotas = typeof options.getQuotas === "function" ? options.getQuotas : () => ({});
   const retryDelayMs = Number.isFinite(options.retryDelayMs) && options.retryDelayMs >= 0 ? options.retryDelayMs : 20_000;
   const AGENT_LABEL = Object.fromEntries(PROVIDER_IDS.map((id) => [id, providerName(id)]));
@@ -695,6 +719,10 @@ export function createAgentRuntime(options = {}) {
       jobDirectory = await mkdtemp(path.join(runtimeDirectory, `job-${safeId}-`));
       // A coordinated run works only with the agents the user picked for this conversation.
       const team = workflow === "coordinated" ? normalizeParticipants(task.dispatch?.participants ?? task.participants) : [workflow];
+      if (team.includes("antigravity")) {
+        if (mode === "review") throw new Error("Antigravity 尚未支援工具層受限的唯讀複核；請選擇 Codex 或 Claude。");
+        if (preparedImages.images.length) throw new Error("Antigravity CLI 目前只支援文字任務；請移除圖片或改選 Codex／Claude，以免遺漏附件。");
+      }
       const forced = team.length === 1 ? team[0] : null;
       const tracksChanges = mode === "implement";
       const resumedRun = Boolean(task.dispatch);
@@ -822,10 +850,14 @@ export function createAgentRuntime(options = {}) {
       const callAgent = (agent, { context, work, readOnly = false, schema, images = false }, outputDirectory) => !AGENTS.includes(agent) ? unsupported(agent) : agent === "claude"
         ? runClaude({ workspace, task: work || context, context: work ? context : undefined, mode: readOnly ? "review" : mode, max_turns: task.max_turns, effort: effort.claude,
           currentRequest: userRequest, conversationContext: messages, ...(images ? { attachments: task.attachments } : {}) }, { onProgress, signal })
-        : runCodex({ workspace, mode: readOnly ? "review" : mode, outputDirectory, schema, effort: effort.codex, images: images ? preparedImages.images : [],
+        : agent === "antigravity" ? runAntigravity({ workspace, mode: readOnly ? "review" : mode,
+          prompt: [...base("antigravity"), ...(historyPrompt ? [historyPrompt] : []), context,
+            "The assignment below is the current user's request, more recent than all supplied conversation history. Honor its restrictions.",
+            "<assignment>", userRequest, "</assignment>", ...(work ? [`Your part of this request:\n<step>\n${work}\n</step>`] : [])].join("\n\n") }, { onProgress, signal })
+        : agent === "codex" ? runCodex({ workspace, mode: readOnly ? "review" : mode, outputDirectory, schema, effort: effort.codex, images: images ? preparedImages.images : [],
           prompt: [...base("codex"), ...(historyPrompt ? [historyPrompt] : []), ...(images && imagePrompt ? [imagePrompt] : []), context,
             "The assignment below is the current user's request, more recent than all supplied conversation history. Honor its restrictions.",
-            "<assignment>", userRequest, "</assignment>", ...(work ? [`Your part of this request:\n<step>\n${work}\n</step>`] : [])].join("\n\n") }, { onProgress, signal });
+            "<assignment>", userRequest, "</assignment>", ...(work ? [`Your part of this request:\n<step>\n${work}\n</step>`] : [])].join("\n\n") }, { onProgress, signal }) : unsupported(agent);
       const stepReports = (limit = 6000) => dispatch.steps.map((step, index) =>
         `<${step.agent || "claude"}-report step="${index + 1}">\n${step.title}\n${String(step.output || "").slice(0, limit)}\n</${step.agent || "claude"}-report>`);
 
@@ -884,8 +916,11 @@ export function createAgentRuntime(options = {}) {
             return stageRun(name, agent, (outputDirectory) => direct
               ? (!AGENTS.includes(agent) ? unsupported(agent) : agent === "claude"
                 ? runClaude({ workspace, task: prompt, mode, max_turns: task.max_turns, conversationContext: messages, effort: effort.claude, attachments: task.attachments }, { onProgress, signal })
-                : runCodex({ workspace, mode, outputDirectory, effort: effort.codex, images: preparedImages.images, prompt: [...base("codex").slice(1), ...(historyPrompt ? [historyPrompt] : []), ...(imagePrompt ? [imagePrompt] : []),
-                  "The assignment below is the current user's request, more recent than all supplied conversation history.", "<assignment>", prompt, "</assignment>"].join("\n\n") }, { onProgress, signal }))
+                : agent === "antigravity" ? runAntigravity({ workspace, mode,
+                  prompt: ["You are Antigravity, handling the user's task through the official agy CLI.", ...base("antigravity").slice(1), ...(historyPrompt ? [historyPrompt] : []),
+                    "The assignment below is the current user's request, more recent than all supplied conversation history.", "<assignment>", prompt, "</assignment>"].join("\n\n") }, { onProgress, signal })
+                : agent === "codex" ? runCodex({ workspace, mode, outputDirectory, effort: effort.codex, images: preparedImages.images, prompt: [...base("codex").slice(1), ...(historyPrompt ? [historyPrompt] : []), ...(imagePrompt ? [imagePrompt] : []),
+                  "The assignment below is the current user's request, more recent than all supplied conversation history.", "<assignment>", prompt, "</assignment>"].join("\n\n") }, { onProgress, signal }) : unsupported(agent))
               : callAgent(agent, { context: prompt, work: step.instruction, images: index === 0 }, outputDirectory),
             { role: "executor", step: index, note: handoffNote(interrupted, agent, label) || (interrupted ? `從中斷處續作${label}` : "") });
           });

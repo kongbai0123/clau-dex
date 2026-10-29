@@ -111,7 +111,7 @@ test("Windows environment combines PATH key casing, deduplicates entries, and pr
   assert.deepEqual(Object.keys(result).filter(key => key.toLowerCase() === "path"), ["Path"]);
   assert.deepEqual(result.Path.split(";"), [first, second, path.join(env.ProgramFiles, "nodejs"),
     path.join(env.APPDATA, "npm"), path.join(env.USERPROFILE, ".local", "bin"),
-    path.join(env.SystemRoot, "System32"), env.SystemRoot]);
+    path.join(env.LOCALAPPDATA, "agy", "bin"), path.join(env.SystemRoot, "System32"), env.SystemRoot]);
   assert.equal(result.arbitrary, "kept");
 });
 
@@ -127,13 +127,33 @@ test("Windows PATH expansion and direct executable paths retain spaces without s
 test("missing installations preserve the bare command fallback", () => {
   const { options } = fixture();
   for (const agent of ["codex", "claude"]) assert.deepEqual(resolveCliCommand(agent, options), { command: agent, args: [] });
+  assert.deepEqual(resolveCliCommand("antigravity", options), { command: "agy", args: [] });
+});
+
+test("Antigravity resolves the official installer's agy.exe when PATH is stripped", () => {
+  const { env, options } = fixture();
+  const agy = file(env.LOCALAPPDATA, "agy", "bin", "agy.exe");
+  assert.deepEqual(resolveCliCommand("antigravity", options), { command: agy, args: [] });
+  delete env.Path; env.PATH = "";
+  assert.deepEqual(resolveCliCommand("antigravity", options), { command: agy, args: [] });
+  assert.ok(buildCliEnvironment(env, { platform: "win32" }).PATH.split(";").includes(path.dirname(agy)));
+});
+
+test("caller PATH agy takes priority over the official installer location", () => {
+  const { directory, env, options } = fixture();
+  const custom = path.join(directory, "custom agy");
+  env.Path = custom;
+  file(env.LOCALAPPDATA, "agy", "bin", "agy.exe");
+  const selected = file(custom, "agy.exe");
+  assert.equal(resolveCliCommand("antigravity", options).command, selected);
 });
 
 test("empty Windows PATH gains node, npm and lifecycle helper directories", () => {
   const { env } = fixture();
   const result = buildCliEnvironment({ ...env, PATH: "" }, { platform: "win32" });
   assert.deepEqual(result.PATH.split(";"), [path.join(env.ProgramFiles, "nodejs"), path.join(env.APPDATA, "npm"),
-    path.join(env.USERPROFILE, ".local", "bin"), path.join(env.SystemRoot, "System32"), env.SystemRoot]);
+    path.join(env.USERPROFILE, ".local", "bin"), path.join(env.LOCALAPPDATA, "agy", "bin"),
+    path.join(env.SystemRoot, "System32"), env.SystemRoot]);
   assert.equal(result.SystemRoot, env.SystemRoot);
 });
 

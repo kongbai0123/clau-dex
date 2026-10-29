@@ -37,7 +37,8 @@ export function buildCliEnvironment(env = process.env, options = {}) {
   const originalKey = Object.keys(env).find((key) => key.toLowerCase() === "path") || "Path";
   const entries = [...pathEntries(env), path.join(roots.programFiles, "nodejs"),
     path.join(roots.appData, "npm"), path.join(roots.homeDirectory, ".local", "bin"),
-    path.join(roots.systemRoot, "System32"), roots.systemRoot];
+    // The official Antigravity installer (antigravity.google/cli/install.ps1) places agy.exe here.
+    path.join(roots.localAppData, "agy", "bin"), path.join(roots.systemRoot, "System32"), roots.systemRoot];
   const seen = new Set();
   const unique = entries.filter((entry) => {
     const key = path.normalize(entry).replace(/[\\/]+$/, "").toLowerCase();

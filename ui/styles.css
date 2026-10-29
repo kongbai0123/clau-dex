@@ -113,7 +113,9 @@ input.effort-slider,input.effort-slider:read-only,input.effort-slider:focus{--fi
 .ins-tl-bar span.running{background-image:repeating-linear-gradient(45deg,#ffffff55 0 3px,transparent 3px 7px)!important}
 .ins-tl-bar span.failed{outline:2px solid #d03b3b;outline-offset:-2px}
 /* misc */
-.ins-agent-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px}
+.ins-agent-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-top:6px}
+.ins-agent-row .status-badge{max-width:100%;white-space:normal;overflow-wrap:anywhere;line-height:1.5}
+.ins-agent-row .status-dot{flex-shrink:0}
 .ins-agent{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#3f4a35}
 .ins-tokens{font-size:11px;color:#6b7560;line-height:1.7;margin:2px 0 8px}
 .ins-tokens:last-child{margin-bottom:0}
@@ -193,3 +195,20 @@ input.effort-slider,input.effort-slider:read-only,input.effort-slider:focus{--fi
 .agent-avatar.antigravity{color:#2f7a70;background:#e8f5f2}.welcome-agent.antigravity{color:#2f7a70;background:#f1f9f7;border-color:#d6ebe7}.message[data-message-role=antigravity] .message-avatar{background:#f1f9f7;border-color:#d6ebe7;color:#2f7a70}.message[data-message-role=antigravity] .message-name{color:#2f6f66}
 .composer-error-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:7px}.button.small{min-height:28px;padding:4px 10px;font-size:11px}.app-card-footer{flex-wrap:wrap}
 .app-grid{grid-template-columns:1fr;gap:14px}.app-card-header{margin-bottom:16px}.app-card-header .status-badge{margin-left:auto}.app-card-body{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px 24px}.app-card-body .app-data{flex-direction:column;justify-content:flex-start;gap:4px;margin:0}.app-card-body .app-data strong{max-width:none;text-align:left}.app-card-footer{margin-top:16px;padding-top:14px}
+
+.app-data .cli-path{overflow-wrap:anywhere;min-width:0}.app-card-body .app-data strong{overflow-wrap:anywhere}
+/* Agent management: one summary per provider, with contextual details. */
+.agent-management{max-width:1160px;margin:0 auto;width:100%;padding:26px 28px}
+.management-heading{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:14px}
+.management-heading h1{font-size:24px;color:#35482d}.management-heading p,.management-note{font-size:13px;color:#606d56;line-height:1.65}
+.management-heading .button{flex-shrink:0}.management-status{font-size:13px;color:#405633;background:#f1f5eb;border:1px solid #e0e8d6;border-radius:10px;padding:10px 14px}
+.service-disclosure{margin:9px 0 18px;font-size:12px;color:#5b6951}.service-disclosure>summary{cursor:pointer;padding:5px 0;width:fit-content}.service-disclosure[open]{border-bottom:1px solid var(--line);padding-bottom:12px}
+.agent-list{display:grid;gap:12px}.agent-row{border:1px solid #dfe5d9;border-radius:13px;padding:17px 19px;background:#fff;min-width:0}
+.agent-row-main{display:flex;gap:12px;align-items:center}.agent-row-title{min-width:0;flex:1}.agent-row-title h2{font-size:16px;color:#35482d}.agent-row-title p{font-size:12px;color:#65725b}.agent-row .agent-avatar{width:34px;height:34px;border-radius:10px;flex-shrink:0}.agent-row .status-badge{font-size:12px;white-space:normal;max-width:45%;color:#3f652a}
+.agent-row .status-badge.muted{color:#59674f}.agent-row-meta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 14px;margin:10px 0;font-size:12px;color:#606d56}
+.agent-row-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px;color:#637259}.agent-row-footer>div{display:flex;gap:7px;flex-shrink:0}.agent-row-footer .button{padding:6px 11px;min-height:32px}
+.management-note{margin-top:14px;font-size:12px}.agent-detail.app-card{padding:0;border:0;background:transparent;box-shadow:none}.agent-detail>h2{font-size:19px;color:#35482d;margin-bottom:17px}
+.agent-detail-section{padding:0 0 18px;margin-bottom:18px;border-bottom:1px solid #dfe5d9}.agent-detail-section h3{font-size:14px;color:#35482d;margin-bottom:9px}.agent-detail-section p{font-size:13px;color:#536348;line-height:1.8;margin:8px 0}.agent-detail dl,.agent-diagnostics dl{margin:10px 0;font-size:12px}.agent-detail dt{color:#64725a;margin-top:8px}.agent-detail dd{margin:3px 0;color:#35482d;overflow-wrap:anywhere}.agent-detail .status-badge{white-space:normal}.agent-detail-actions{display:flex;flex-wrap:wrap;gap:8px}.agent-detail .button{max-width:100%;white-space:normal}.agent-diagnostics summary{cursor:pointer;font-size:13px;font-weight:600;color:#405633;padding:4px 0}.agent-diagnostics code{font-size:12px;overflow-wrap:anywhere}.agent-detail .inline-error{color:#8d3f29}
+.agent-management button:focus-visible,.agent-detail button:focus-visible,.agent-diagnostics summary:focus-visible{outline:3px solid #6a8a52;outline-offset:3px}
+@media(max-width:1000px){.agent-management{padding:22px 20px}.management-heading{align-items:flex-start}.management-heading p{max-width:390px}}
+@media(max-width:650px){.management-heading{flex-wrap:wrap}.agent-row{padding:14px}.agent-row-meta{display:block}.agent-row-footer{align-items:flex-start;flex-wrap:wrap}.management-heading h1{font-size:21px}}

@@ -131,7 +131,8 @@ async function runSmoke() {
     await until(() => services.snapshot().settings.closeLaunchedApps, 'Shutdown preference not saved.');
     await js("document.querySelector('[data-view=workspace]').click(); (()=>{const want='claude';const chip=id=>document.querySelector('[data-participant='+id+']');if(!chip(want).classList.contains('selected'))chip(want).click();let other;while((other=Array.from(document.querySelectorAll('[data-participant].selected')).find(el=>el.dataset.participant!==want)))other.click();})()");
     // Recreate the old obstruction even when the product notification moves elsewhere.
-    await js("showToast('通知出現時，傳送按鈕仍可點擊'); const toast=document.querySelector('#toast'); toast.style.top='auto'; toast.style.bottom='24px'");
+    // app.js is a module, so show the toast through the DOM rather than a global helper.
+    await js("const toast=document.querySelector('#toast'); toast.querySelector('span').textContent='通知出現時，傳送按鈕仍可點擊'; toast.hidden=false; toast.style.top='auto'; toast.style.bottom='24px'");
     assert.equal(await js("document.querySelector('#toast').hidden"), false);
     await send('等待取消驗證', { expectOverlay: true });
     await js("document.querySelector('#toast').style.removeProperty('top'); document.querySelector('#toast').style.removeProperty('bottom')");

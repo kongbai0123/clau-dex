@@ -1,3 +1,5 @@
+import { PROVIDERS } from "./providers.js";
+
 // Reasoning effort per agent. "auto" passes no flag, so each CLI keeps its own default.
 export const EFFORT_LEVELS = Object.freeze({
   // Codex: -c model_reasoning_effort=<level>. Max/Ultra depend on the selected model.
@@ -15,7 +17,7 @@ export function normalizeEffort(value) {
   const result = { ...DEFAULT_EFFORT };
   for (const agent of Object.keys(EFFORT_LEVELS)) {
     if (value[agent] === undefined) continue;
-    if (!EFFORT_LEVELS[agent].includes(value[agent])) throw new Error(`無效的 ${agent === "codex" ? "Codex" : "Claude"} 思考強度。`);
+    if (!EFFORT_LEVELS[agent].includes(value[agent])) throw new Error(`無效的 ${PROVIDERS[agent].name} 思考強度。`);
     result[agent] = value[agent];
   }
   return result;

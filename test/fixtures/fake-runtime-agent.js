@@ -13,6 +13,8 @@ if (scenario === "descendant") {
     appendFileSync(captureFile, `${JSON.stringify({ agent, args, pid: process.pid })}\n`);
     setInterval(() => {}, 1000);
   } else console.log(`${agent}-cli 1.2.3`);
+} else if (agent === "antigravity" && args.includes("--help")) {
+  console.log("--input-format --output-format --print-timeout --mode --sandbox --disable-slash-commands");
 } else if (args.includes("status") && (args.includes("auth") || args.includes("login"))) {
   if (scenario === "unauthenticated") {
     console.log(JSON.stringify({ loggedIn: false, email: "private@example.com", token: "sk-sensitive-test-token" }));

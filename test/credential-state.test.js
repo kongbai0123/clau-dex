@@ -195,7 +195,7 @@ test("a broken agy version command still checks the independent credential marke
 });
 
 test("a working agy and credential entry still do not prove a valid account session", async () => {
-  const runtime = createAgentRuntime({ antigravityCommand: command("console.log('agy 1.2.3')"), credentialExists: async () => true });
+  const runtime = createAgentRuntime({ antigravityCommand: command("console.log(process.argv.includes('--help') ? '--input-format --output-format --print-timeout --mode --sandbox --disable-slash-commands' : 'agy 1.2.3')"), credentialExists: async () => true });
   try {
     const status = await runtime.probeAgent("antigravity");
     assert.equal(status.available, true);

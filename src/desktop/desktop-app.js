@@ -19,7 +19,7 @@ export async function createDesktopApp(options = {}) {
   const log = (kind, detail) => { try { appendFileSync(logFile, `${new Date().toISOString()} [${kind}] ${String(detail).replace(/\s+/g, " ").slice(0, 2000)}\n`, "utf8"); } catch { /* logging must never break the app */ } };
   log("start", `pid ${process.pid}`);
   app.setPath("userData", path.join(dataDirectory, "desktop-profile"));
-  app.setName("Codex Claude 協作管理器");
+  app.setName("Clau-dex");
   if (!app.requestSingleInstanceLock()) { app.quit(); return null; }
   await app.whenReady();
   let window = null; let cleanupComplete = false; let closing = null; let updateTimer;

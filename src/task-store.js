@@ -64,6 +64,29 @@ function atomicWrite(file, value) {
   }
 }
 
+/** The Agents, coordinator and effort a new conversation starts with: Codex + Claude, led by Codex, auto effort. */
+function defaultAgentDefaults() {
+  const participants = normalizeParticipants(undefined);
+  return { participants, coordinator: coordinatorFor(normalizeCoordinator(undefined), participants), effort: normalizeEffort() };
+}
+/** Strict form for saving: throws for unknown or unrunnable Agents, coordinators and effort levels. */
+export function validateAgentDefaults(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("無效的預設 AI 設定。");
+  const participants = value.participants === undefined ? normalizeParticipants(undefined) : validateParticipants(value.participants);
+  if (value.coordinator !== undefined && !COORDINATORS.includes(value.coordinator)) throw new Error("無效的統籌方。");
+  return { participants, coordinator: coordinatorFor(normalizeCoordinator(value.coordinator), participants), effort: normalizeEffort(value.effort) };
+}
+/** Lenient form for loading: each malformed field falls back to its default instead of failing startup. */
+function storedAgentDefaults(value) {
+  const fallback = defaultAgentDefaults();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  let participants = fallback.participants;
+  try { participants = validateParticipants(value.participants); } catch {}
+  let effort = fallback.effort;
+  try { effort = normalizeEffort(value.effort); } catch {}
+  return { participants, coordinator: coordinatorFor(normalizeCoordinator(value.coordinator), participants), effort };
+}
+
 export function resolveWorkspaceDirectory(directory) {
   if (typeof directory !== "string" || !path.isAbsolute(directory)) {
     throw new Error("workspace must be an absolute path to a local directory.");
@@ -176,10 +199,18 @@ export function createTaskStore(dataDirectory, { inspectProcesses = inspectProce
     const file = path.join(directory, "settings.json");
     let saved = {};
     try { saved = JSON.parse(readFileSync(file, "utf8")); } catch {}
-    return { workspace: typeof saved.workspace === "string" ? saved.workspace : (defaults.workspace || ""), closeLaunchedApps: saved.closeLaunchedApps === true };
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) saved = {};
+    return {
+      workspace: typeof saved.workspace === "string" ? saved.workspace : (defaults.workspace || ""),
+      closeLaunchedApps: saved.closeLaunchedApps === true,
+      agentDefaults: storedAgentDefaults(saved.agentDefaults),
+    };
   }
   function saveSettings(settings) {
-    const normalized = { workspace: String(settings.workspace || ""), closeLaunchedApps: settings.closeLaunchedApps === true };
+    const normalized = {
+      workspace: String(settings.workspace || ""), closeLaunchedApps: settings.closeLaunchedApps === true,
+      agentDefaults: settings.agentDefaults === undefined ? defaultAgentDefaults() : validateAgentDefaults(settings.agentDefaults),
+    };
     atomicWrite(path.join(directory, "settings.json"), normalized);
     return normalized;
   }
