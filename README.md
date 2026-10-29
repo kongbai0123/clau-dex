@@ -18,7 +18,7 @@ Clau-dex 是一款 Windows 桌面應用，讓 Codex CLI、Claude Code CLI 與 An
 - **多 Agent 協作**：在對話選項的「參與的 AI」中，可以複選要納入的 AI。只選一個時，由它直接回覆；選兩個以上時，由 Codex 或 Claude 統籌、指派與複核，Antigravity 可承接文字任務。若某方額度用盡，會由其他已勾選且能擔任該角色的 AI 接手。
 - **圖片輸入**：Codex／Claude 支援貼上、選檔、拖放與圖片續問；包含 Antigravity 的任務目前會明確拒絕圖片輸入。
 - **觀察面板**：查看 CLI 狀態、用量、對話進度、Token 統計與程序資訊。
-- **Agent 管理**：同屏比較三個 Agent 的 CLI、登入觀測與最近執行結果；詳細資料統一分為執行與登入、桌面 App、進階診斷。
+- **Agent 管理**：同屏比較各 Agent 的 CLI、登入觀測與最近執行結果；詳細資料統一分為執行與登入、桌面 App、進階診斷。
 - **沿用上次 Agent 選擇**：Agent 組合、統籌方與思考強度會自動儲存，下次開啟預填；舊對話保留各自設定。啟動時重新檢查 CLI，沿用 CLI 保存的有效登入，不會自動開啟三個 AI 桌面 App。
 - **引導式登入**：Codex／Claude 由 CLI 開啟官方登入流程，完成授權後更新狀態。Antigravity 一律開啟 App 登入，並保留重新登入入口；Bridge 只觀察本機憑證項目是否存在，不讀取其內容，也不把項目存在當作有效帳號驗證。
 - **Codex MCP 整合**：提供 `check_bridge` 與 `delegate_to_claude` 工具。
@@ -140,7 +140,7 @@ npm test
 npm run check
 ```
 
-`npm test` 執行 Node.js 自動化測試；`npm run check` 檢查應用程式 JavaScript 語法。桌面 smoke 檢查需以 Electron 執行，報告與截圖會寫入 `.bridge/`：
+`npm test` 執行 Node.js 自動化測試，其中也檢查畫面是否完全依 provider 註冊表產生（新增或移除 AI 的方式見 [Agent 管理](docs/agent-management.md#新增或移除-ai)）；`npm run check` 檢查應用程式 JavaScript 語法。桌面 smoke 檢查需以 Electron 執行，報告與截圖會寫入 `.bridge/`：
 
 | 指令 | 驗證內容 |
 | --- | --- |

@@ -1,6 +1,6 @@
 # Agent 管理
 
-Agent 管理統一 Codex、Claude 與 Antigravity 的執行狀態、登入入口及桌面程式管理。執行任務透過 CLI；桌面 App 不必保持開啟。
+Agent 管理統一各 AI（目前為 Codex、Claude 與 Antigravity）的執行狀態、登入入口及桌面程式管理。執行任務透過 CLI；桌面 App 不必保持開啟。
 
 ## 頁面項目
 
@@ -45,3 +45,34 @@ Antigravity 的憑證存在／不存在／無法確認是獨立觀測；不會�
 `npm test` 包含共用狀態模組的優先順序、憑證三態、不變性及可傳送性測試。
 
 手動執行 `npx electron test/electron-agent-management-smoke.mjs` 可驗證真實 renderer／IPC 的三 Agent 同屏、詳細資料、狀態切換、服務 gate、焦點保存、窄視窗及選定 Agent 建立新對話。此測試使用隔離資料與假提供者，不呼叫模型或桌面 App；結果寫入 `.bridge/agent-management-smoke/report.json`。
+
+## 新增或移除 AI
+
+畫面上所有和 AI 有關的項目都依 `src/providers.js` 的註冊表產生，包括：
+- 參與的 AI 晶片、統籌方選項；
+- 思考強度滑桿；
+- 歡迎文字、輸入框提示、接手說明；
+- 額度與 Token 用量列、圖例；
+- Agent 管理卡片與系統面板；
+- 頭像、晶片與訊息配色。
+
+新增或移除註冊表中的項目後，上述畫面會自動跟著增減，不必修改 `ui/`。`test/provider-ui.test.js` 會檢查畫面程式沒有寫死個別 AI；如果有人再把某個 AI 寫進畫面，測試就會失敗。
+
+在註冊表中新增 AI 時，要填寫的欄位：
+
+| 欄位 | 用途 |
+| --- | --- |
+| `name`、`appName`、`cli` | 顯示名稱、桌面 App 名稱、CLI 執行檔 |
+| `coordinate`、`tasks`、`images` | 能否統籌與複核、能否接聊天室任務、能否收圖片 |
+| `login`、`status`、`credentialTarget`、`signInWith` | 登入與狀態檢查方式 |
+| `effort` | CLI 接受的思考強度等級，第一個必須是 `auto`（不傳參數）；沒有就填 `null`，畫面不顯示滑桿 |
+| `quota` | 方案額度的資料來源說明；無法查詢就填 `null`，畫面顯示「暫不支援查詢」 |
+| `theme` | 圖表色與深淺三階；`ink`／`text`／`soft`／`line` 為頭像、晶片與訊息的配色，可省略 |
+
+圖示使用 `ui/index.html` 中的 `<symbol id="i-<id>">`。沒有對應圖示時，會改用中性圖示。
+
+以下後端部分仍需依提供者的 CLI 實作，畫面不會自動處理：
+- `src/agent-runtime.js`：任務執行與結果判讀。
+- `src/cli-discovery.js`：官方預設安裝位置。
+- `src/app-manager.js`：桌面 App 的 AppID 與程序白名單。
+- `src/usage-monitor.js`：本機用量與額度讀取。

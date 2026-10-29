@@ -124,19 +124,28 @@ async function main() {
     report.checks.push('History and sidebar delete remove durable records and private images; running deletion awaits owned process cleanup and preserves other rooms');
     // The empty room, effort section and takeover note follow whichever AIs are selected.
     const team = ids => js(`(()=>{const want=${JSON.stringify(ids)};const chip=id=>document.querySelector('[data-participant='+id+']');for(const id of want)if(!chip(id).classList.contains('selected'))chip(id).click();let other;while((other=Array.from(document.querySelectorAll('[data-participant].selected')).find(el=>!want.includes(el.dataset.participant))))other.click();})()`);
-    const view = () => js("({welcome:Array.from(document.querySelectorAll('.welcome-agent')).map(el=>el.className),text:document.querySelector('.chat-welcome p')?.textContent||'',effort:document.querySelector('#effort-description').textContent,rows:Array.from(document.querySelectorAll('[data-effort-row]')).filter(el=>!el.hidden).length,workflow:document.querySelector('#workflow-description').textContent})");
+    const view = () => js("({icons:document.querySelectorAll('.chat-welcome .icon').length,text:document.querySelector('.chat-welcome p')?.textContent||'',hint:!document.querySelector('#effort-description').hidden,rows:Array.from(document.querySelectorAll('[data-effort-row]')).filter(el=>!el.hidden).map(el=>el.dataset.effortRow),workflow:document.querySelector('#workflow-description').textContent})");
     await team(['antigravity']); let shown = await view();
-    assert.deepEqual(shown.welcome, ['welcome-agent antigravity']); assert.match(shown.text, /Antigravity/); assert.doesNotMatch(shown.text, /Codex|Claude|接力/);
-    assert.equal(shown.rows, 0); assert.match(shown.effort, /^Antigravity 沿用 CLI 預設/);
+    assert.equal(shown.icons, 0); assert.match(shown.text, /Antigravity/); assert.doesNotMatch(shown.text, /Codex|Claude|接力/);
+    assert.deepEqual(shown.rows, ['antigravity']); assert.equal(shown.hint, true);
+    // Antigravity's slider is generated from the registry and its level is saved with the Agent defaults.
+    await js("document.querySelector('#chat-options').open=true;(()=>{const slider=document.querySelector('[data-effort-agent=antigravity]');slider.value=String(slider.max);slider.dispatchEvent(new Event('input',{bubbles:true}));})()");
+    await until(() => services.snapshot().settings.agentDefaults?.effort?.antigravity === 'max', 'Antigravity effort was not saved.');
+    assert.equal(await js("document.querySelector('#effort-antigravity-label').textContent"), 'Max');
+    await js("(()=>{const slider=document.querySelector('[data-effort-agent=antigravity]');slider.value='0';slider.dispatchEvent(new Event('input',{bubbles:true}));})();document.querySelector('#chat-options').open=false");
+    await until(() => services.snapshot().settings.agentDefaults?.effort?.antigravity === 'auto', 'Antigravity effort did not return to default.');
     await team(['codex', 'antigravity']); shown = await view();
-    assert.equal(shown.welcome.length, 2); assert.match(shown.text, /Codex 與 Antigravity/); assert.equal(shown.rows, 1); assert.match(shown.effort, /最左邊是「預設」.*Antigravity 沿用 CLI 預設/);
+    assert.match(shown.text, /Codex 與 Antigravity/); assert.deepEqual(shown.rows, ['codex', 'antigravity']); assert.equal(shown.hint, true);
     assert.match(shown.workflow, /任務會暫停/); assert.match(shown.workflow, /Antigravity 只承接執行步驟，不擔任統籌或複核/);
     await team(['codex', 'claude', 'antigravity']); shown = await view();
-    assert.equal(shown.welcome.length, 3); assert.match(shown.workflow, /由 (Codex|Claude) 接手統籌與複核；Antigravity 只承接執行步驟/);
+    assert.match(shown.text, /Codex、Claude 與 Antigravity/); assert.deepEqual(shown.rows, ['codex', 'claude', 'antigravity']); assert.match(shown.workflow, /由 (Codex|Claude) 接手統籌與複核；Antigravity 只承接執行步驟/);
     await pause(400); // let the view repaint before capturing
     writeFileSync(path.join(artifacts, 'welcome-team.png'), (await window.webContents.capturePage()).toPNG());
+    await js("document.querySelector('#chat-options').open=true;document.querySelector('.effort-field').scrollIntoView()"); await pause(400);
+    writeFileSync(path.join(artifacts, 'effort-team.png'), (await window.webContents.capturePage()).toPNG());
+    await js("document.querySelector('#chat-options').open=false");
     await team(['codex']); shown = await view();
-    assert.match(shown.text, /Codex/); assert.doesNotMatch(shown.text, /接力/); assert.doesNotMatch(shown.workflow, /接手/); assert.doesNotMatch(shown.effort, /沿用 CLI 預設，暫不支援/);
+    assert.match(shown.text, /Codex/); assert.doesNotMatch(shown.text, /接力/); assert.doesNotMatch(shown.workflow, /接手/); assert.deepEqual(shown.rows, ['codex']);
     report.checks.push('Empty-room welcome, effort note and takeover wording follow the selected AIs');
     writeFileSync(path.join(artifacts, 'after-delete.png'), (await window.webContents.capturePage()).toPNG());
     if(originalClipboard) await clipboard.write(originalClipboard); report.preClosePassed = true; window.close();

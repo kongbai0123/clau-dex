@@ -1,4 +1,5 @@
 import { deriveAgentReadiness } from "../src/agent-readiness.js";
+import { providerSummaries } from "../src/providers.js";
 
 "use strict";
 
@@ -7,25 +8,18 @@ const $$ = (selector, scope = document) => [...scope.querySelectorAll(selector)]
 const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 const VIEW_LABELS = { workspace: "聊天室", apps: "Agent 管理", history: "對話紀錄", settings: "設定" };
-// Mirrors src/providers.js until the first snapshot arrives with the live list.
-const DEFAULT_PROVIDERS = [
-  { id: "codex", name: "Codex", appName: "Codex", coordinate: true, tasks: true, images: true },
-  { id: "claude", name: "Claude", appName: "Claude Code", coordinate: true, tasks: true, images: true },
-  { id: "antigravity", name: "Antigravity", appName: "Antigravity", coordinate: false, tasks: true, images: false, signInWith: "app" },
-];
+// Every agent-specific surface is drawn from the provider registry; the live list arrives with each snapshot.
+const DEFAULT_PROVIDERS = providerSummaries();
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const MAX_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
-// Keep in sync with src/effort.js. "auto" passes no flag to the CLI.
-const EFFORT_LEVELS = { codex: ["auto", "low", "medium", "high", "xhigh", "max", "ultra"], claude: ["auto", "low", "medium", "high", "xhigh", "max"] };
 const EFFORT_LABELS = { auto: "預設", low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max", ultra: "Ultra" };
-const EFFORT_HINT = "最左邊是「預設」，沿用各 CLI 自己的設定。越往右思考越深入，回覆較慢、用量也較高；Max、Ultra 需目前模型支援。";
 const EFFORT_SHORT = { low: "Low", medium: "Med", high: "High", xhigh: "XHigh", max: "Max", ultra: "Ultra" };
 function effortOf(value) {
-  const effort = { codex: "auto", claude: "auto" };
-  for (const agent of Object.keys(EFFORT_LEVELS)) if (EFFORT_LEVELS[agent].includes(value?.[agent])) effort[agent] = value[agent];
+  const effort = {};
+  for (const agent of effortAgents()) effort[agent] = effortLevels(agent).includes(value?.[agent]) ? value[agent] : "auto";
   return effort;
 }
 function providers() { return Array.isArray(state?.snapshot?.providers) && state.snapshot.providers.length ? state.snapshot.providers : DEFAULT_PROVIDERS; }
@@ -33,6 +27,11 @@ function taskAgents() { return providers().filter((provider) => provider.tasks).
 function coordinators() { return providers().filter((provider) => provider.coordinate).map((provider) => provider.id); }
 function signsInWithApp(id) { return providers().find((provider) => provider.id === id)?.signInWith === "app"; }
 function agentName(id) { return providers().find((provider) => provider.id === id)?.name || "Codex"; }
+function effortLevels(id) { return providers().find((provider) => provider.id === id)?.effort || null; }
+function effortAgents() { return providers().filter((provider) => provider.effort?.length).map((provider) => provider.id); }
+function themeOf(id) { return providers().find((provider) => provider.id === id)?.theme || { color: "#7d8a72", shades: ["#c9d0c2", "#7d8a72", "#4c5644"] }; }
+/** A provider's own icon when the page defines one, otherwise a neutral agent mark. */
+function agentIcon(id) { return icon(document.getElementById(`i-${id}`) ? id : "chat"); }
 function appName(id) { return providers().find((provider) => provider.id === id)?.appName || agentName(id); }
 /** The AI picked for a room; rooms saved before multi-select only stored a workflow. */
 function participantsOf(value, workflow = "coordinated") {
@@ -69,7 +68,7 @@ const state = {
   snapshot: { agents: {}, bridge: { state: "starting", tools: [] }, apps: {}, tasks: [], conversations: [], settings: { workspace: "", closeLaunchedApps: false }, shuttingDown: false },
   selectedAgent: null, managementHtml: "",
   loaded: false, view: "workspace", selectedConversationId: null,
-  options: { workspace: "", participants: ["codex", "claude"], effort: effortOf(), coordinator: "codex" }, optionDirty: false,
+  options: { workspace: "", participants: ["codex", "claude"], effort: {}, coordinator: "codex" }, optionDirty: false,
   drafts: new Map(), busy: new Set(), error: null, apiError: null, toastTimer: null,
   settingsWorkspaceDirty: false, composing: false, forceScroll: false,
   renderedRoom: undefined, renderedMessages: "",
@@ -77,6 +76,9 @@ const state = {
   imageDrafts: new Map(), imageErrors: new Map(), imagePreviews: new Map(), uploadingImages: new Map(), imageGenerations: new Map(), deletedRooms: new Set(),
   renderedDraftImages: "", pendingDeleteId: null, dragDepth: 0,
 };
+
+// Filled after `state` exists: effortOf reads the provider list through state.
+state.options.effort = effortOf();
 
 function conversation() { return (state.snapshot.conversations || []).find((room) => room.id === state.selectedConversationId) || null; }
 function roomsByRecency() { return [...(state.snapshot.conversations || [])].sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)); }
@@ -240,7 +242,7 @@ function syncOptionControls() {
     const selected = team.includes(provider.id); const agent = state.snapshot.agents?.[provider.id] || {}; const status = agentStatus(agent, provider.id);
     const unsupported = !provider.tasks;
     const title = unsupported ? `${provider.appName} 目前只能在 Agent 管理查看狀態與登入，還不能接聊天室任務` : `${provider.appName} · ${status.text}${credentialHint(agent, provider.id) ? ` · ${credentialHint(agent, provider.id)}` : ""}${selected && team.length === 1 ? "（至少保留一個 AI）" : ""}`;
-    return `<button type="button" class="participant-chip ${provider.id}${selected ? " selected" : ""}" data-participant="${escapeHtml(provider.id)}" aria-pressed="${selected}" title="${escapeHtml(title)}" ${unsupported || locked ? "disabled" : ""}>${icon(selected ? "check" : provider.id)}<span>${escapeHtml(provider.name)}</span>${unsupported ? '<small>僅 Agent 管理</small>' : `<i class="status-dot ${status.type === "ready" ? "" : status.type}" aria-hidden="true"></i>`}</button>`;
+    return `<button type="button" class="participant-chip ${provider.id}${selected ? " selected" : ""}" data-participant="${escapeHtml(provider.id)}" aria-pressed="${selected}" title="${escapeHtml(title)}" ${unsupported || locked ? "disabled" : ""}>${selected ? icon("check") : agentIcon(provider.id)}<span>${escapeHtml(provider.name)}</span>${unsupported ? '<small>僅 Agent 管理</small>' : `<i class="status-dot ${status.type === "ready" ? "" : status.type}" aria-hidden="true"></i>`}</button>`;
   }).join("");
   const leads = team.filter((agent) => coordinators().includes(agent));
   $("#coordinator-options").innerHTML = leads.map((agent) => `<button class="segment${agent === lead ? " selected" : ""}" type="button" data-coordinator="${escapeHtml(agent)}" aria-pressed="${agent === lead}" ${locked ? "disabled" : ""}>${escapeHtml(agentName(agent))}</button>`).join("");
@@ -252,20 +254,24 @@ function syncOptionControls() {
   const takeover = `${agentName(lead)} 額度用完時，${backupLeads ? `由 ${backupLeads} 接手統籌與複核` : "任務會暫停，等你接續"}${executors ? `；${executors} 只承接執行步驟，不擔任統籌或複核` : ""}。`;
   $("#workflow-description").textContent = team.length === 1 ? `由 ${appName(team[0])} 回覆與處理這則訊息。` : `${agentName(lead)} 統籌：把需求整理成驗收標準，依任務性質指派 ${team.map(agentName).join("、")} 執行，再逐條審查；未達標就退回修正（最多 2 輪），最後交付結果。${takeover}`;
   const agents = team;
-  for (const agent of Object.keys(EFFORT_LEVELS)) {
-    const levels = EFFORT_LEVELS[agent]; const level = state.options.effort[agent]; const index = Math.max(0, levels.indexOf(level));
+  renderEffortRows();
+  for (const agent of effortAgents()) {
+    const levels = effortLevels(agent); const level = state.options.effort[agent] || "auto"; const index = Math.max(0, levels.indexOf(level));
     const slider = $(`#effort-${agent}`); slider.value = String(index); slider.style.setProperty("--fill", `${(index / (levels.length - 1)) * 100}%`);
     slider.setAttribute("aria-valuetext", EFFORT_LABELS[level]); slider.dataset.level = level;
     $(`#effort-${agent}-label`).textContent = EFFORT_LABELS[level]; $(`#effort-${agent}-label`).dataset.level = level;
     $(`[data-effort-row="${agent}"]`).hidden = !agents.includes(agent);
   }
-  // AIs without effort levels keep their CLI default; say so instead of leaving an empty section.
-  const fixed = agents.filter((agent) => !EFFORT_LEVELS[agent]).map(agentName).join("、");
-  const adjustable = agents.some((agent) => EFFORT_LEVELS[agent]);
-  $("#effort-description").textContent = `${adjustable ? EFFORT_HINT : ""}${fixed ? `${adjustable ? " " : ""}${fixed} 沿用 CLI 預設，暫不支援調整思考強度。` : ""}`;
+}
+/** One slider per provider with effort levels, rebuilt only when the provider list changes. */
+function renderEffortRows() {
+  const agents = effortAgents(); const signature = agents.map((agent) => `${agent}:${effortLevels(agent).join("|")}`).join(",");
+  const box = $("#effort-rows"); if (box.dataset.signature === signature) return;
+  box.dataset.signature = signature;
+  box.innerHTML = agents.map((agent) => { const id = escapeHtml(agent); return `<div class="effort-row" data-effort-row="${id}"><div class="effort-head"><label class="effort-agent" for="effort-${id}">${agentIcon(agent)}${escapeHtml(agentName(agent))}</label><span id="effort-${id}-label" class="effort-value">預設</span></div><input id="effort-${id}" class="effort-slider" type="range" min="0" max="${effortLevels(agent).length - 1}" step="1" value="0" data-effort-agent="${id}" aria-describedby="effort-description"/></div>`; }).join("");
 }
 function effortSummary() {
-  return state.options.participants.filter((agent) => EFFORT_LEVELS[agent] && state.options.effort[agent] !== "auto")
+  return state.options.participants.filter((agent) => effortLevels(agent) && state.options.effort[agent] !== "auto")
     .map((agent) => `${agentName(agent)} ${EFFORT_SHORT[state.options.effort[agent]]}`).join(" · ");
 }
 function messageHtml(message) {
@@ -277,12 +283,11 @@ function messageHtml(message) {
   const failure = ["failed", "cancelled", "interrupted"].includes(message.status);
   const statusText = message.status === "handoff" ? "已交接" : message.status === "paused" ? "已暫停" : message.status === "queued" ? "等待回覆" : message.status === "running" ? "正在回覆" : message.status === "cancelled" ? "已停止" : message.status === "interrupted" ? "已中斷" : message.status === "failed" ? "回覆未完成" : "";
   const formatted = escapeHtml(content).replace(/```(?:[\w-]+)?\n([\s\S]*?)```/g, "<pre>$1</pre>").replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  return `<article class="message" data-message-role="${role}" data-message-id="${escapeHtml(message.id)}"><div class="message-avatar">${icon(role === "user" ? "codex" : role)}</div><div class="message-main"><div class="message-heading"><span class="message-name">${name}</span>${statusText ? `<span class="message-state ${failure ? "error" : ""}">${statusText}</span>` : ""}${content && role !== "user" ? `<button class="icon-button message-copy" data-copy-message="${escapeHtml(message.id)}" title="複製 ${name} 的回覆" aria-label="複製 ${name} 的回覆">${icon("copy")}</button>` : ""}</div>${message.note ? `<p class="message-note">${icon("link")}${escapeHtml(message.note)}</p>` : ""}${images.length ? `<div class="message-images" aria-label="訊息中的圖片">${imageMarkup(images)}</div>` : ""}${content ? `<div class="message-content">${formatted}</div>` : images.length ? "" : active ? '<div class="typing-dots" aria-label="正在等待回覆"><span></span><span></span><span></span></div>' : '<p class="message-no-content">這則回覆沒有內容。</p>'}</div></article>`;
+  return `<article class="message" data-message-role="${role}" data-message-id="${escapeHtml(message.id)}"><div class="message-avatar">${role === "user" ? icon("codex") : agentIcon(role)}</div><div class="message-main"><div class="message-heading"><span class="message-name">${name}</span>${statusText ? `<span class="message-state ${failure ? "error" : ""}">${statusText}</span>` : ""}${content && role !== "user" ? `<button class="icon-button message-copy" data-copy-message="${escapeHtml(message.id)}" title="複製 ${name} 的回覆" aria-label="複製 ${name} 的回覆">${icon("copy")}</button>` : ""}</div>${message.note ? `<p class="message-note">${icon("link")}${escapeHtml(message.note)}</p>` : ""}${images.length ? `<div class="message-images" aria-label="訊息中的圖片">${imageMarkup(images)}</div>` : ""}${content ? `<div class="message-content">${formatted}</div>` : images.length ? "" : active ? '<div class="typing-dots" aria-label="正在等待回覆"><span></span><span></span><span></span></div>' : '<p class="message-no-content">這則回覆沒有內容。</p>'}</div></article>`;
 }
 /** The empty-room greeting names exactly the AIs selected for the next message. */
 function welcomeHtml(team) {
-  const avatars = team.map((agent) => `<span class="welcome-agent ${escapeHtml(agent)}">${icon(agent)}</span>`).join('<span class="welcome-divider"></span>');
-  return `<div class="chat-welcome"><div class="welcome-agents" aria-hidden="true">${avatars}</div><h1>想一起完成什麼？</h1><p>直接輸入目標，${escapeHtml(joinNames(team))}<br>會在這裡${team.length > 1 ? "接力" : ""}回覆。</p></div>`;
+  return `<div class="chat-welcome"><h1>想一起完成什麼？</h1><p>直接輸入目標，${escapeHtml(joinNames(team))}<br>會在這裡${team.length > 1 ? "接力" : ""}回覆。</p></div>`;
 }
 function joinNames(team) { const names = team.map(agentName); return names.length > 1 ? `${names.slice(0, -1).join("、")} 與 ${names.at(-1)}` : names[0] || ""; }
 function renderChat() {
@@ -347,7 +352,7 @@ function renderApps() {
     const key = provider.id, agent = state.snapshot.agents?.[key] || {}, status = readiness(key);
     const bridgeReady = state.snapshot.bridge?.state === "running";
     const actionLabel = status.canSend && !bridgeReady ? "服務未啟動" : status.canSend ? "前往聊天室" : status.action === "login" ? "前往登入" : "查看修復方式";
-    return `<article class="agent-row" data-agent-row="${key}" data-readiness="${status.code}"><div class="agent-row-main"><div class="agent-avatar ${key}">${icon(key)}</div><div class="agent-row-title"><h2>${escapeHtml(provider.name)}</h2><p>${provider.images ? "文字與圖片" : "文字任務"} · ${provider.coordinate ? "統籌與複核" : "協作執行"}</p></div>${statusBadge(status.text, status.type)}</div><div class="agent-row-meta"><p>${escapeHtml(status.credentialText)}</p><p>${escapeHtml(runLabel(key))}</p></div><div class="agent-row-footer"><span>${escapeHtml(agent.version || "版本待確認")}</span><div><button class="button secondary small" type="button" data-agent-details="${key}" data-focus-key="details-${key}" aria-controls="inspector" aria-expanded="${state.view === "apps" && state.selectedAgent === key}">詳細資料</button><button class="button primary small" type="button" data-agent-primary="${key}" data-focus-key="primary-${key}" ${locked || state.busy.has("new-room") || status.action === "none" || (status.canSend && !bridgeReady) ? "disabled" : ""}>${actionLabel}</button></div></div></article>`;
+    return `<article class="agent-row" data-agent-row="${key}" data-readiness="${status.code}"><div class="agent-row-main"><div class="agent-avatar ${key}">${agentIcon(key)}</div><div class="agent-row-title"><h2>${escapeHtml(provider.name)}</h2><p>${provider.images ? "文字與圖片" : "文字任務"} · ${provider.coordinate ? "統籌與複核" : "協作執行"}</p></div>${statusBadge(status.text, status.type)}</div><div class="agent-row-meta"><p>${escapeHtml(status.credentialText)}</p><p>${escapeHtml(runLabel(key))}</p></div><div class="agent-row-footer"><span>${escapeHtml(agent.version || "版本待確認")}</span><div><button class="button secondary small" type="button" data-agent-details="${key}" data-focus-key="details-${key}" aria-controls="inspector" aria-expanded="${state.view === "apps" && state.selectedAgent === key}">詳細資料</button><button class="button primary small" type="button" data-agent-primary="${key}" data-focus-key="primary-${key}" ${locked || state.busy.has("new-room") || status.action === "none" || (status.canSend && !bridgeReady) ? "disabled" : ""}>${actionLabel}</button></div></div></article>`;
   }).join("");
   replaceRegion($("#app-cards"), rows);
   const ready = providers().filter(provider => readiness(provider.id).canSend).length;
@@ -368,7 +373,9 @@ function renderComposer() {
   renderDraftImages();
   const keys = state.options.participants;
   const historicalImages = Boolean(conversation()?.messages?.some(message => message.role === "user" && message.attachments?.length));
-  const unsupportedImages = keys.some(key => providers().find(provider => provider.id === key)?.images === false) && (draftImages(key).length > 0 || historicalImages);
+  const textOnly = keys.filter(key => providers().find(provider => provider.id === key)?.images === false);
+  const imageCapable = providers().filter(provider => provider.tasks && provider.images).map(provider => provider.name).join("／");
+  const unsupportedImages = textOnly.length > 0 && (draftImages(key).length > 0 || historicalImages);
   const checking = keys.filter(key => ["checking", "unknown", "signing-in"].includes(readiness(key).code));
   const login = keys.filter(key => readiness(key).code === "needs-login");
   const missing = keys.filter(key => !readiness(key).canSend && !checking.includes(key) && !login.includes(key));
@@ -391,8 +398,8 @@ function renderComposer() {
   const agentNames = (agentKeys) => agentKeys.map(agentName).join("、");
   const gateError = state.apiError ? "無法連接管理服務，請重新開啟工作台。" : state.loaded && state.snapshot.bridge?.state !== "running" ? "管理服務尚未啟動，請到 Agent 管理啟動橋接。" : state.loaded && checking.length ? `正在檢查 ${agentNames(checking)} CLI 狀態，完成後即可傳送…` : state.loaded && missing.length ? `${agentNames(missing)} CLI 尚不可用，請到 Agent 管理查看狀態。` : state.loaded && login.length ? `${agentNames(login)} 尚未登入，請先完成登入。` : null;
   const error = state.error || state.imageErrors.get(key) || (unsupportedImages ? historicalImages
-    ? "這段對話的前文含圖片，Antigravity CLI 目前只支援文字；請另開純文字對話或改選 Codex／Claude。"
-    : "Antigravity CLI 目前只支援文字任務；請移除圖片或改選 Codex／Claude。" : gateError); $("#composer-error").hidden = !error;
+    ? `這段對話的前文含圖片，${agentNames(textOnly)} CLI 目前只支援文字；請另開純文字對話或改選 ${imageCapable}。`
+    : `${agentNames(textOnly)} CLI 目前只支援文字任務；請移除圖片或改選 ${imageCapable}。` : gateError); $("#composer-error").hidden = !error;
   // A sign-in gate offers the sign-in right where it blocks sending.
   const loginButtons = !state.error && !state.imageErrors.get(key) && error === gateError && login.length ? login.map((agent) => loginControl(agent, state.snapshot.agents?.[agent] || {}, true)).join("") : "";
   $("#composer-error").innerHTML = `${escapeHtml(error || "")}${loginButtons ? `<span class="composer-error-actions">${loginButtons}</span>` : ""}`;
@@ -417,8 +424,8 @@ function stageLabel(name) {
 }
 const STATUS_LABELS = { queued: "等待中", running: "執行中", completed: "完成", failed: "失敗", cancelled: "已停止", interrupted: "已中斷" };
 // Agent identity colors (validated for color-vision deficiency on the white surface).
-const AGENT_COLORS = { codex: "#3f7cb4", claude: "#d0824f", antigravity: "#2f9488" };
-const AGENT_SHADES = { codex: ["#a7c3df", "#3f7cb4", "#1f4c78"], claude: ["#edc3a6", "#d0824f", "#8f4d26"], antigravity: ["#a3d4cd", "#2f9488", "#1b5b53"] };
+const AGENT_COLORS = new Proxy({}, { get: (_target, id) => themeOf(String(id)).color });
+const AGENT_SHADES = new Proxy({}, { get: (_target, id) => themeOf(String(id)).shades });
 const AGENT_NAMES = new Proxy({}, { get: (_target, id) => agentName(String(id)) });
 const SEVERITY = { good: { color: "#5f9a3c", label: "充足" }, warning: { color: "#d9a21b", label: "偏低" }, critical: { color: "#d03b3b", label: "快用完" } };
 const OUTCOME_COLORS = { completed: "#5f9a3c", running: "#8fa0b3", queued: "#c3ccd6", failed: "#d03b3b", cancelled: "#b3b8ad", interrupted: "#b3b8ad" };
@@ -550,49 +557,46 @@ function quotaRows(usageAgent, agent = "codex") {
 }
 function usageTabHtml() {
   const usage = state.snapshot.usage || {};
-  const codex = usage.codex; const claude = usage.claude;
   const loading = !usage.checkedAt;
+  const quotaWindows = (entry) => [entry?.quota?.primary, entry?.quota?.secondary].filter(Boolean);
 
-  // 1. Quota: how much of the plan is left.
-  let quota;
-  if (loading) quota = '<p class="ins-muted">正在讀取本機紀錄…</p>';
-  else if (codex?.error) quota = `<p class="ins-error">${escapeHtml(codex.error)}</p>`;
-  else if (codex?.quota && (codex.quota.primary || codex.quota.secondary)) quota = quotaRows(codex);
-  else quota = meterRow({ agent: "codex", name: "Codex", value: "尚無紀錄", empty: true, meta: "<span>在 Codex App 或 CLI 互動模式使用一次後就會出現</span>" });
-  if (claude?.quota && (claude.quota.primary || claude.quota.secondary)) quota += quotaRows(claude, "claude");
-  else {
-    const status = claude?.quotaStatus?.state || (loading ? "loading" : "no-data");
-    const labels = { ready: "尚無紀錄", loading: "讀取中", "no-data": "尚無紀錄", unsupported: "暫不支援", error: "讀取失敗" };
-    const messages = { ready: "尚未取得 Claude 額度資料。", loading: "正在讀取 Claude CLI 額度…", "no-data": "尚未取得 Claude 額度紀錄，請稍後重新整理。", unsupported: "目前 Claude CLI 尚未提供可讀取的額度資料。", error: "Claude 額度讀取失敗，請稍後重新整理。" };
-    quota += meterRow({ agent: "claude", name: "Claude", value: labels[status] || "尚無紀錄", empty: true,
-      meta: `<span>${escapeHtml(claude?.quotaStatus?.message || messages[status] || messages["no-data"])}</span>` });
-  }
-  quota += meterRow({ agent: "antigravity", name: "Antigravity", value: "暫不支援查詢", empty: true, meta: "<span>目前無方案額度查詢介面；不影響文字任務執行。</span>" });
-  quota += `<button class="button secondary small" type="button" data-refresh-quota ${state.busy.has("quota-refresh") || state.snapshot.shuttingDown ? "disabled" : ""}>更新 Claude 額度（使用少量用量）</button>`;
-  const hasWeekly = [codex?.quota?.primary, codex?.quota?.secondary, claude?.quota?.primary, claude?.quota?.secondary].some((window) => (window?.windowMinutes ?? 0) > 360);
-  const observed = [["Codex", codex?.quota], ["Claude", claude?.quota]].filter(([, quota]) => quota).map(([name, quota]) => `${name} ${name === "Codex" ? "資料來自最近一次工作階段" : "資料由 Claude CLI 取得"} · ${escapeHtml(relativeTime(quota.observedAt))}${quota.stale ? `（快取 · ${escapeHtml(dateLabel(quota.observedAt))}）` : ""}`);
+  // 1. Quota: how much of the plan is left, for every provider in the registry.
+  const quotaStatusLabels = { ready: "尚無紀錄", loading: "讀取中", "no-data": "尚無紀錄", unsupported: "暫不支援", error: "讀取失敗" };
+  const quotaStatusMessages = (name) => ({ ready: `尚未取得 ${name} 額度資料。`, loading: `正在讀取 ${name} 額度…`, "no-data": `尚未取得 ${name} 額度紀錄，請稍後重新整理。`, unsupported: `目前 ${name} 尚未提供可讀取的額度資料。`, error: `${name} 額度讀取失敗，請稍後重新整理。` });
+  let quota = loading ? '<p class="ins-muted">正在讀取本機紀錄…</p>' : providers().map(({ id, name, quota: source }) => {
+    const entry = usage[id];
+    if (!source) return meterRow({ agent: id, name, value: "暫不支援查詢", empty: true, meta: "<span>目前無方案額度查詢介面；不影響文字任務執行。</span>" });
+    if (entry?.error) return `<p class="ins-error">${escapeHtml(entry.error)}</p>`;
+    if (quotaWindows(entry).length) return quotaRows(entry, id);
+    const status = entry?.quotaStatus?.state || "no-data";
+    return meterRow({ agent: id, name, value: quotaStatusLabels[status] || "尚無紀錄", empty: true,
+      meta: `<span>${escapeHtml(entry?.quotaStatus?.message || (entry?.quotaStatus ? quotaStatusMessages(name)[status] : `在 ${appName(id)} App 或 CLI 使用一次後就會出現`))}</span>` });
+  }).join("");
+  if (!loading && providers().some((provider) => provider.id === "claude")) quota += `<button class="button secondary small" type="button" data-refresh-quota ${state.busy.has("quota-refresh") || state.snapshot.shuttingDown ? "disabled" : ""}>更新 Claude 額度（使用少量用量）</button>`;
+  const hasWeekly = providers().flatMap(({ id }) => quotaWindows(usage[id])).some((window) => (window?.windowMinutes ?? 0) > 360);
+  const observed = providers().filter(({ id, quota }) => quota && usage[id]?.quota).map(({ id, name, quota: source }) => [name, source, usage[id].quota]).map(([name, source, quota]) => `${name} ${source} · ${escapeHtml(relativeTime(quota.observedAt))}${quota.stale ? `（快取 · ${escapeHtml(dateLabel(quota.observedAt))}）` : ""}`);
   quota += `<p class="ins-foot">${hasWeekly ? '<span class="ins-marker-key"></span>直線＝本週時間進度，色條超過直線代表用得比時間快。' : ""}${observed.length ? `${hasWeekly ? "<br>" : ""}${observed.join("<br>")}` : ""}</p>`;
 
   // 2. Tokens: how much was consumed today, per agent, split by where it was used.
   const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
   const todayTasks = (state.snapshot.tasks || []).filter((task) => new Date(task.createdAt) >= startToday);
   const bridgeStages = todayTasks.flatMap((task) => task.stages || []);
-  const tokenAgents = ["codex", "claude", "antigravity"];
-  const local = { codex: usageTotals(codex?.today), claude: usageTotals(claude?.today), antigravity: usageTotals(null) };
+  const tokenAgents = taskAgents();
+  const local = Object.fromEntries(tokenAgents.map((agent) => [agent, usageTotals(usage[agent]?.today)]));
   const bridge = Object.fromEntries(tokenAgents.map(agent => [agent, sumStages(bridgeStages, agent)]));
   const sum = (value) => value.inputTokens + value.outputTokens;
   const totals = Object.fromEntries(tokenAgents.map((agent) => [agent, sum(local[agent]) + sum(bridge[agent])]));
   const max = Math.max(1, ...Object.values(totals));
   const tokenRows = tokenAgents.map((agent) => {
-    const known = agent === "codex" ? Boolean(codex?.today) : agent === "claude" ? Boolean(claude?.today) : bridgeStages.some(stage => stage.agent === "antigravity" && stage.usage);
+    const known = Boolean(usage[agent]?.today) || bridgeStages.some(stage => stage.agent === agent && stage.usage);
     const localTotal = sum(local[agent]); const bridgeTotal = sum(bridge[agent]);
     const input = local[agent].inputTokens + bridge[agent].inputTokens; const cached = local[agent].cachedInputTokens + bridge[agent].cachedInputTokens; const output = local[agent].outputTokens + bridge[agent].outputTokens;
     const [light, , dark] = AGENT_SHADES[agent];
     const segments = [{ value: localTotal, color: AGENT_COLORS[agent], tip: [`${formatTokens(localTotal)} tokens`, `${AGENT_NAMES[agent]} · App／CLI`] }, { value: bridgeTotal, color: light, tip: [`${formatTokens(bridgeTotal)} tokens`, `${AGENT_NAMES[agent]} · 工作台`] }].filter((segment) => segment.value > 0);
-    const recent = agent === "claude" && claude?.recent5h ? ` · 最近 5 小時輸出 ${formatTokens(usageTotals(claude.recent5h).outputTokens)}` : "";
-    return `<div class="ins-meter" data-usage-agent="${agent}"><div class="ins-meter-head"><span class="ins-meter-name"><i style="background:${AGENT_COLORS[agent]}"></i>${AGENT_NAMES[agent]}</span><span class="ins-meter-value">${escapeHtml(formatTokens(totals[agent]))}<small> tokens</small></span></div><div class="ins-meter-track">${segments.length ? `<div class="ins-meter-stack" style="width:${(totals[agent] / max) * 100}%">${segments.map((segment) => `<span style="flex-grow:${segment.value};background:${segment.color}" ${tipAttr(segment.tip)} tabindex="0"></span>`).join("")}</div>` : ""}</div><p class="ins-meter-meta"><span>輸入 ${formatTokens(input)}${cached ? `（快取 ${formatTokens(cached)}）` : ""} · 輸出 <strong>${formatTokens(output)}</strong>${escapeHtml(recent)}</span>${agent === "antigravity" ? "<span>僅計入工作台任務回報；未回報的用量不列入。</span>" : ""}${!known && !bridgeTotal ? "<span>今天尚無紀錄</span>" : ""}</p></div>`;
+    const recent = usage[agent]?.recent5h ? ` · 最近 5 小時輸出 ${formatTokens(usageTotals(usage[agent].recent5h).outputTokens)}` : "";
+    return `<div class="ins-meter" data-usage-agent="${agent}"><div class="ins-meter-head"><span class="ins-meter-name"><i style="background:${AGENT_COLORS[agent]}"></i>${AGENT_NAMES[agent]}</span><span class="ins-meter-value">${escapeHtml(formatTokens(totals[agent]))}<small> tokens</small></span></div><div class="ins-meter-track">${segments.length ? `<div class="ins-meter-stack" style="width:${(totals[agent] / max) * 100}%">${segments.map((segment) => `<span style="flex-grow:${segment.value};background:${segment.color}" ${tipAttr(segment.tip)} tabindex="0"></span>`).join("")}</div>` : ""}</div><p class="ins-meter-meta"><span>輸入 ${formatTokens(input)}${cached ? `（快取 ${formatTokens(cached)}）` : ""} · 輸出 <strong>${formatTokens(output)}</strong>${escapeHtml(recent)}</span>${!usage[agent] ? "<span>僅計入工作台任務回報；未回報的用量不列入。</span>" : ""}${!known && !bridgeTotal ? "<span>今天尚無紀錄</span>" : ""}</p></div>`;
   }).join("");
-  const tokenLegend = `<ul class="ins-legend"><li><i style="background:${AGENT_COLORS.codex}"></i><i style="background:${AGENT_COLORS.claude}"></i>深色＝App／CLI</li><li><i style="background:${AGENT_SHADES.codex[0]}"></i><i style="background:${AGENT_SHADES.claude[0]}"></i>淺色＝工作台</li></ul>`;
+  const tokenLegend = `<ul class="ins-legend"><li>${tokenAgents.map((agent) => `<i style="background:${AGENT_COLORS[agent]}"></i>`).join("")}深色＝App／CLI</li><li>${tokenAgents.map((agent) => `<i style="background:${AGENT_SHADES[agent][0]}"></i>`).join("")}淺色＝工作台</li></ul>`;
   const tokens = loading ? '<p class="ins-muted">正在讀取本機紀錄…</p>' : tokenRows + tokenLegend;
 
   // 3. Runs: how today's manager messages went.
@@ -600,9 +604,10 @@ function usageTabHtml() {
   if (todayTasks.length) {
     const groups = ["completed", "running", "queued", "failed", "cancelled", "interrupted"].map((status) => ({ status, count: todayTasks.filter((task) => task.status === status).length })).filter((group) => group.count);
     const finished = todayTasks.filter((task) => task.startedAt && task.finishedAt);
+    const costed = tokenAgents.filter((agent) => bridge[agent].hasCost);
     const average = finished.length ? finished.reduce((total, task) => total + elapsed(task.startedAt, task.finishedAt), 0) / finished.length : NaN;
     runs = `<div class="ins-meter"><div class="ins-meter-head"><span class="ins-meter-name">訊息結果</span><span class="ins-meter-value">${todayTasks.length}<small> 則</small></span></div>${stackBar(groups.map((group) => ({ value: group.count, color: OUTCOME_COLORS[group.status], tip: [`${group.count} 則`, STATUS_LABELS[group.status]] })), "今天訊息結果")}</div>${legend(groups.map((group) => ({ color: OUTCOME_COLORS[group.status], label: STATUS_LABELS[group.status], value: String(group.count) })))}`
-      + `<p class="ins-foot">${Number.isFinite(average) ? `平均每則 ${escapeHtml(formatDuration(average))}` : ""}${bridge.claude.hasCost ? `${Number.isFinite(average) ? " · " : ""}Claude 等值 API 費用約 ${money(bridge.claude.costUsd)}（訂閱方案不另計費）` : ""}</p>`;
+      + `<p class="ins-foot">${Number.isFinite(average) ? `平均每則 ${escapeHtml(formatDuration(average))}` : ""}${costed.length ? `${Number.isFinite(average) ? " · " : ""}${costed.map((agent) => `${AGENT_NAMES[agent]} 等值 API 費用約 ${money(bridge[agent].costUsd)}`).join("、")}（訂閱方案不另計費）` : ""}</p>`;
   }
   return zone("quota", "gauge", "額度", "方案還能用多少", quota)
     + zone("tokens", "chat", "Token 消耗", "今天用了多少 tokens", tokens, loading ? "" : `${escapeHtml(formatTokens(Object.values(totals).reduce((sum, value) => sum + value, 0)))}<small> tokens</small>`)
@@ -665,13 +670,13 @@ function conversationTabHtml() {
   const agentTotal = (agent) => totals[agent].inputTokens + totals[agent].outputTokens;
   const allTokens = shown.reduce((sum, agent) => sum + agentTotal(agent), 0);
   const effort = effortOf(room.effort);
-  const settings = `<div class="ins-chips"><span>${escapeHtml(teamLabel(team))}</span>${team.length > 1 ? `<span>${AGENT_NAMES[coordinatorOf(room.coordinator, team)]} 統籌</span>` : ""}${team.map((agent) => `<span>${AGENT_NAMES[agent]}${EFFORT_LEVELS[agent] ? ` ${escapeHtml(EFFORT_LABELS[effort[agent]])}` : ""}</span>`).join("")}<span>${tasks.length} 則訊息</span></div>`;
+  const settings = `<div class="ins-chips"><span>${escapeHtml(teamLabel(team))}</span>${team.length > 1 ? `<span>${AGENT_NAMES[coordinatorOf(room.coordinator, team)]} 統籌</span>` : ""}${team.map((agent) => `<span>${AGENT_NAMES[agent]}${effortLevels(agent) ? ` ${escapeHtml(EFFORT_LABELS[effort[agent]])}` : ""}</span>`).join("")}<span>${tasks.length} 則訊息</span></div>`;
   const agentLegend = legend(shown.map((agent) => ({ color: AGENT_COLORS[agent], label: AGENT_NAMES[agent] })));
   const recent = tasks.slice(-8);
   const live = active ? zone("live", "clock", "執行狀態", active.status === "paused" ? "額度用盡，已暫停；等你接續" : active.progress || "執行中", stageProgress(active), active.status === "paused" ? "已暫停" : active.startedAt ? `<span data-since="${escapeHtml(active.startedAt)}">${formatDuration(elapsed(active.startedAt))}</span>` : "排隊中") : "";
   const max = Math.max(1, ...shown.map(agentTotal));
   const agentRows = shown.map((agent) => meterRow({ agent, name: AGENT_NAMES[agent], value: formatTokens(agentTotal(agent)), percent: (agentTotal(agent) / max) * 100, color: AGENT_COLORS[agent],
-    meta: `<span>輸入 ${formatTokens(totals[agent].inputTokens)} · 輸出 <strong>${formatTokens(totals[agent].outputTokens)}</strong>${agent === "claude" && totals.claude.hasCost ? ` · 約 ${money(totals.claude.costUsd)}` : ""}</span>`,
+    meta: `<span>輸入 ${formatTokens(totals[agent].inputTokens)} · 輸出 <strong>${formatTokens(totals[agent].outputTokens)}</strong>${totals[agent].hasCost ? ` · 約 ${money(totals[agent].costUsd)}` : ""}</span>`,
     tip: [`${formatTokens(agentTotal(agent))} tokens`, `${AGENT_NAMES[agent]} · ${totals[agent].runs} 次執行`] })).join("");
   const tokens = zone("tokens", "chat", "Token 消耗", "這段對話用了多少 tokens", agentRows + (recent.length ? `<h4 class="ins-subhead">每則訊息</h4>${agentLegend}${timelineChart(recent, "tokens")}` : ""), `${escapeHtml(formatTokens(allTokens))}<small> tokens</small>`);
   const time = zone("time", "clock", "耗時", "每則訊息花了多久", recent.length ? agentLegend + timelineChart(recent, "time") : '<p class="ins-muted">尚無執行紀錄。</p>', escapeHtml(formatDuration(totalMs)));
@@ -729,7 +734,18 @@ setInterval(() => {
   if (!state.inspector.open) return;
   $$("#inspector-body [data-since]").forEach((element) => { element.textContent = formatDuration(elapsed(element.dataset.since)); });
 }, 1000);
-function render() { renderChat(); renderHistory(); renderBridge(); renderApps(); renderComposer(); renderInspector(); }
+/** Per-provider tints for avatars, chips and messages, generated from the registry so new providers need no CSS. */
+function renderProviderTheme() {
+  const css = providers().filter((provider) => provider.theme?.ink).map(({ id, theme: { ink, text, soft, line } }) => {
+    const key = CSS.escape(id);
+    return `.agent-avatar.${key}{color:${ink};background:${soft}}.participant-chip.${key}.selected{border-color:${line};background:${soft};color:${text}}`
+      + `.message[data-message-role="${key}"] .message-avatar{background:${soft};border-color:${line};color:${ink}}.message[data-message-role="${key}"] .message-name{color:${text}}`;
+  }).join("");
+  let style = $("#provider-theme");
+  if (!style) { style = document.createElement("style"); style.id = "provider-theme"; document.head.append(style); }
+  if (style.textContent !== css) style.textContent = css;
+}
+function render() { renderProviderTheme(); renderChat(); renderHistory(); renderBridge(); renderApps(); renderComposer(); renderInspector(); }
 function resetToBlankDraft() {
   state.selectedConversationId = null; state.options = { ...defaultAgentOptions(), workspace: state.snapshot.settings?.workspace || "" }; state.optionDirty = false; state.error = null; state.forceScroll = true;
   state.drafts.set("new", ""); state.imageDrafts.delete("new"); state.imageErrors.delete("new"); state.imageGenerations.set("new", (state.imageGenerations.get("new") || 0) + 1); loadDraft();
@@ -893,11 +909,12 @@ $("#task-description").addEventListener("compositionstart", () => { state.compos
 $("#task-description").addEventListener("compositionend", () => { state.composing = false; });
 $("#task-description").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !state.composing && event.keyCode !== 229) { event.preventDefault(); if (!$("#submit-task").disabled && !activeTaskId()) sendMessage(); } });
 $("#task-workspace").addEventListener("input", (event) => { state.options.workspace = event.target.value; state.optionDirty = true; state.error = null; renderComposer(); });
-$$("[data-effort-agent]").forEach((slider) => slider.addEventListener("input", () => {
-  const agent = slider.dataset.effortAgent; const level = EFFORT_LEVELS[agent][Number(slider.value)];
+$("#effort-rows").addEventListener("input", (event) => {
+  const slider = event.target.closest("[data-effort-agent]"); if (!slider) return;
+  const agent = slider.dataset.effortAgent; const level = effortLevels(agent)?.[Number(slider.value)];
   if (!level || slider.disabled) return;
   state.options.effort = { ...state.options.effort, [agent]: level }; state.optionDirty = true; rememberAgentDefaults(); syncOptionControls(); renderComposer();
-}));
+});
 $("#select-workspace").addEventListener("click", () => chooseWorkspace(false));
 $("#select-settings-workspace").addEventListener("click", () => chooseWorkspace(true));
 $("#history-search").addEventListener("input", renderHistory);

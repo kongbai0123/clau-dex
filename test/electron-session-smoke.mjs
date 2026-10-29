@@ -23,8 +23,8 @@ assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 
 mkdirSync(dataDirectory, { recursive: true });
 if (phase === 'write') writeFileSync(stateFile, JSON.stringify(saved, null, 2));
 
-const expectedTeam = { participants: ['codex', 'claude', 'antigravity'], coordinator: 'claude', effort: { codex: 'high', claude: 'medium' } };
-const expectedSolo = { participants: ['antigravity'], coordinator: 'codex', effort: { codex: 'high', claude: 'medium' } };
+const expectedTeam = { participants: ['codex', 'claude', 'antigravity'], coordinator: 'claude', effort: { codex: 'high', claude: 'medium', antigravity: 'xhigh' } };
+const expectedSolo = { participants: ['antigravity'], coordinator: 'codex', effort: { codex: 'high', claude: 'medium', antigravity: 'xhigh' } };
 const report = { phase, passed: false, checks: [], rendererErrors: [], dataDirectory };
 let runtimeClosed = false;
 let appManagerDisposed = false;
@@ -51,7 +51,7 @@ async function until(condition, reason) {
   throw new Error(reason);
 }
 const sameDefaults = (actual, expected) => JSON.stringify(actual?.participants) === JSON.stringify(expected.participants)
-  && actual?.coordinator === expected.coordinator && actual?.effort?.codex === expected.effort.codex && actual?.effort?.claude === expected.effort.claude;
+  && actual?.coordinator === expected.coordinator && Object.keys(expected.effort).every(agent => actual?.effort?.[agent] === expected.effort[agent]);
 const saveReport = () => writeFileSync(path.join(artifacts, `${phase}-report.json`), JSON.stringify(report, null, 2));
 let instance;
 async function main() {
@@ -75,7 +75,7 @@ async function main() {
     const { window, services } = instance;
     window.webContents.on('console-message', event => { if (event.level === 'error') report.rendererErrors.push(event.message); });
     const js = code => window.webContents.executeJavaScript(code);
-    const selection = () => js("({participants:Array.from(document.querySelectorAll('[data-participant].selected')).map(el=>el.dataset.participant),coordinator:document.querySelector('[data-coordinator].selected')?.dataset.coordinator,effort:{codex:document.querySelector('#effort-codex').dataset.level,claude:document.querySelector('#effort-claude').dataset.level}})");
+    const selection = () => js("({participants:Array.from(document.querySelectorAll('[data-participant].selected')).map(el=>el.dataset.participant),coordinator:document.querySelector('[data-coordinator].selected')?.dataset.coordinator,effort:Object.fromEntries(Array.from(document.querySelectorAll('[data-effort-agent]')).map(el=>[el.dataset.effortAgent,el.dataset.level]))})");
     const assertSelection = async expected => {
       await until(async () => {
         const actual = await selection();
@@ -103,7 +103,7 @@ async function main() {
     if (phase === 'write') {
       await js("document.querySelector('#chat-options').open=true;if(!document.querySelector('[data-participant=antigravity]').classList.contains('selected'))document.querySelector('[data-participant=antigravity]').click()");
       await js("document.querySelector('[data-coordinator=claude]').click()");
-      await js("for(const [id,value] of [['codex','3'],['claude','2']]){const slider=document.querySelector('#effort-'+id);slider.value=value;slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}))}");
+      await js("for(const [id,value] of [['codex','3'],['claude','2'],['antigravity','4']]){const slider=document.querySelector('#effort-'+id);slider.value=value;slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}))}");
       await assertSaved(expectedTeam);
       await assertSelection(expectedTeam);
       report.checks.push('Agent selection, coordinator and effort are saved from the real controls.');

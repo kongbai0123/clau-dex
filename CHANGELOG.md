@@ -8,13 +8,15 @@
 - **刷新與額度查詢分開**：本機狀態刷新不發出模型請求，Claude 額度更新改用明確標示用量的操作入口；保留原有啟動時快取更新行為。
 - **Antigravity 可用狀態呈現**：分開顯示 CLI 能力與憑證觀測；CLI 可用時顯示綠色「CLI 可用」，不冒稱已驗證登入。App 管理補上 CLI 位置與失敗原因，並驗證缺少 CLI／恢復可用時的傳送按鈕狀態。
 - **Antigravity 用量呈現**：用量面板納入工作台 Antigravity 任務實際回報的 token；方案額度明確標示「暫不支援查詢」，不以無資料推斷 Agent 無法使用。
-- **畫面依勾選的 AI 呈現**：空白對話的歡迎畫面、輸入框提示改為依「參與的 AI」顯示；只選 Antigravity 時，思考強度區塊說明其沿用 CLI 預設，不再留白。
+- **畫面依勾選的 AI 呈現**：空白對話的歡迎文字（不再顯示 Agent 圖示）與輸入框提示改為依「參與的 AI」顯示。
 - **接手說明與實際派工一致**：只有 Codex／Claude 會被描述為可接手統籌與複核；Antigravity 標示為只承接執行步驟，沒有其他統籌者時說明任務會暫停。
 - **文字不再只寫兩方**：頁面描述、對話區無障礙標籤、歷史紀錄說明、思考強度錯誤訊息改用通用或 provider 名稱；Electron App 名稱改為 Clau-dex。
 - **smoke 修正**：`app.js` 改以 module 載入後，`electron-smoke` 不再呼叫全域 `showToast`；聊天功能 smoke 新增上述畫面的回歸檢查。
 - **日常環境驗證**：排查文件補上同一路徑在測試程序與日常 Bridge 中可見性不同的情況；必須在日常啟動環境確認 CLI 與執行 live smoke。
 
 ### 新增
+- **畫面依 provider 註冊表產生**：思考強度滑桿、配色、圖示、額度與 Token 列、圖片限制提示都改由 `src/providers.js` 產生，新增或移除 AI 不必修改 `ui/`；新增 `test/provider-ui.test.js` 防止畫面再寫死個別 AI。說明見 [Agent 管理](docs/agent-management.md#新增或移除-ai)。
+- **Antigravity 思考強度**：依官方 `agy --effort`（low／medium／high／xhigh／max）新增可調整的滑桿；「預設」不傳參數，沿用 CLI 自己的設定。設定與 Codex／Claude 一樣隨對話與上次 Agent 設定保存。
 - **沿用上次 Agent 設定**：自動保存 Agent 組合、統籌與思考強度，重新啟動及新對話可沿用；啟動仍重新探測 CLI，不以桌面 App 是否開啟決定任務可用性，也不自動開啟提供者 App。
 - **Antigravity 文字任務**：接入官方 `agy` headless CLI，可單獨執行或接受 Codex／Claude 協作指派；Antigravity 不擔任統籌或複核。
 - **CLI 能力檢查**：支援 Windows 官方預設安裝目錄 `%LOCALAPPDATA%\agy\bin`，並檢查必要 headless 參數，避免把只能開啟 App 的啟動器當成任務 CLI。

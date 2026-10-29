@@ -659,9 +659,10 @@ export function createAgentRuntime(options = {}) {
     return { output, stderr: redact(response.stderr), exitCode: response.exitCode, usage };
   }
 
-  async function runAntigravity({ workspace, prompt, mode }, { onProgress, signal } = {}) {
+  async function runAntigravity({ workspace, prompt, mode, effort = "auto" }, { onProgress, signal } = {}) {
     if (mode === "review") throw new Error("Antigravity 尚未支援工具層受限的唯讀複核；請選擇 Codex 或 Claude。");
-    const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`, "--mode", "accept-edits", "--sandbox", "--disable-slash-commands"];
+    const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`, "--mode", "accept-edits", "--sandbox", "--disable-slash-commands",
+      ...(effort !== "auto" ? ["--effort", effort] : [])];
     const response = await execute("antigravity", args, { cwd: workspace,
       input: JSON.stringify({ event: "user", message: { content: prompt } }) + "\n", onProgress, signal });
     try {
@@ -850,7 +851,7 @@ export function createAgentRuntime(options = {}) {
       const callAgent = (agent, { context, work, readOnly = false, schema, images = false }, outputDirectory) => !AGENTS.includes(agent) ? unsupported(agent) : agent === "claude"
         ? runClaude({ workspace, task: work || context, context: work ? context : undefined, mode: readOnly ? "review" : mode, max_turns: task.max_turns, effort: effort.claude,
           currentRequest: userRequest, conversationContext: messages, ...(images ? { attachments: task.attachments } : {}) }, { onProgress, signal })
-        : agent === "antigravity" ? runAntigravity({ workspace, mode: readOnly ? "review" : mode,
+        : agent === "antigravity" ? runAntigravity({ workspace, mode: readOnly ? "review" : mode, effort: effort.antigravity,
           prompt: [...base("antigravity"), ...(historyPrompt ? [historyPrompt] : []), context,
             "The assignment below is the current user's request, more recent than all supplied conversation history. Honor its restrictions.",
             "<assignment>", userRequest, "</assignment>", ...(work ? [`Your part of this request:\n<step>\n${work}\n</step>`] : [])].join("\n\n") }, { onProgress, signal })
@@ -916,7 +917,7 @@ export function createAgentRuntime(options = {}) {
             return stageRun(name, agent, (outputDirectory) => direct
               ? (!AGENTS.includes(agent) ? unsupported(agent) : agent === "claude"
                 ? runClaude({ workspace, task: prompt, mode, max_turns: task.max_turns, conversationContext: messages, effort: effort.claude, attachments: task.attachments }, { onProgress, signal })
-                : agent === "antigravity" ? runAntigravity({ workspace, mode,
+                : agent === "antigravity" ? runAntigravity({ workspace, mode, effort: effort.antigravity,
                   prompt: ["You are Antigravity, handling the user's task through the official agy CLI.", ...base("antigravity").slice(1), ...(historyPrompt ? [historyPrompt] : []),
                     "The assignment below is the current user's request, more recent than all supplied conversation history.", "<assignment>", prompt, "</assignment>"].join("\n\n") }, { onProgress, signal })
                 : agent === "codex" ? runCodex({ workspace, mode, outputDirectory, effort: effort.codex, images: preparedImages.images, prompt: [...base("codex").slice(1), ...(historyPrompt ? [historyPrompt] : []), ...(imagePrompt ? [imagePrompt] : []),

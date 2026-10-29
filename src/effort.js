@@ -1,16 +1,13 @@
-import { PROVIDERS } from "./providers.js";
+import { PROVIDER_IDS, PROVIDERS } from "./providers.js";
 
-// Reasoning effort per agent. "auto" passes no flag, so each CLI keeps its own default.
-export const EFFORT_LEVELS = Object.freeze({
-  // Codex: -c model_reasoning_effort=<level>. Max/Ultra depend on the selected model.
-  codex: Object.freeze(["auto", "low", "medium", "high", "xhigh", "max", "ultra"]),
-  // Claude Code: --effort <level>.
-  claude: Object.freeze(["auto", "low", "medium", "high", "xhigh", "max"]),
-});
+// Reasoning effort per agent, from each provider's registry entry. "auto" passes no flag, so each CLI keeps
+// its own default. Codex: -c model_reasoning_effort=<level>; Claude Code and agy: --effort <level>.
+export const EFFORT_LEVELS = Object.freeze(Object.fromEntries(PROVIDER_IDS.filter((id) => PROVIDERS[id].effort)
+  .map((id) => [id, Object.freeze([...PROVIDERS[id].effort])])));
 
-export const DEFAULT_EFFORT = Object.freeze({ codex: "auto", claude: "auto" });
+export const DEFAULT_EFFORT = Object.freeze(Object.fromEntries(Object.keys(EFFORT_LEVELS).map((id) => [id, "auto"])));
 
-/** Returns a complete { codex, claude } effort object, or throws for unknown values. */
+/** Returns an effort object with every provider that has levels, or throws for unknown values. */
 export function normalizeEffort(value) {
   if (value === undefined || value === null) return { ...DEFAULT_EFFORT };
   if (typeof value !== "object" || Array.isArray(value)) throw new Error("無效的思考強度設定。");

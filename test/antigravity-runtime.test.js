@@ -158,6 +158,18 @@ for (const action of ["abort", "close", "timeout"]) test(`Antigravity ${action} 
   } finally { await runtime.close(); await running; }
 });
 
+test("Antigravity reasoning effort reaches agy only when it is not the CLI default", async () => {
+  const { runtime, tasks } = createRuntime();
+  try {
+    await runtime.run(assignment());
+    assert.equal(tasks()[0].args.includes("--effort"), false, "auto must keep the CLI's own default.");
+    await runtime.run(assignment({ effort: { antigravity: "xhigh" } }));
+    const args = tasks()[1].args;
+    assert.equal(args[args.indexOf("--effort") + 1], "xhigh");
+    await assert.rejects(runtime.run(assignment({ effort: { antigravity: "ultra" } })), /Antigravity 思考強度/);
+  } finally { await runtime.close(); }
+});
+
 test("Antigravity output overflow terminates the owned process tree", async () => {
   const { runtime, tasks, captureFile } = createRuntime("flood");
   try {

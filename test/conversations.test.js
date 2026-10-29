@@ -361,15 +361,15 @@ test("terminal tasks override stale queued or running stage messages", async () 
 test("rooms persist reasoning effort and pass it to each task", async () => {
   const { services, captured, dataDirectory } = fixture("effort");
   const room = services.createConversation({ workspace, effort: { codex: "high" } });
-  assert.deepEqual(room.effort, { codex: "high", claude: "auto" });
+  assert.deepEqual(room.effort, { codex: "high", claude: "auto", antigravity: "auto" });
   assert.throws(() => services.createConversation({ workspace, effort: { claude: "ultra" } }), /思考強度/);
   const task = services.sendMessage({ conversationId: room.id, message: "Hello", workflow: "coordinated", mode: "review", effort: { codex: "max", claude: "low" } });
   await services.taskManager.wait(task.id);
-  assert.deepEqual(captured[0].effort, { codex: "max", claude: "low" });
-  assert.deepEqual(createConversationStore(dataDirectory).get(room.id).effort, { codex: "max", claude: "low" });
+  assert.deepEqual(captured[0].effort, { codex: "max", claude: "low", antigravity: "auto" });
+  assert.deepEqual(createConversationStore(dataDirectory).get(room.id).effort, { codex: "max", claude: "low", antigravity: "auto" });
   const next = services.sendMessage({ conversationId: room.id, message: "Again" });
   await services.taskManager.wait(next.id);
-  assert.deepEqual(captured[1].effort, { codex: "max", claude: "low" });
+  assert.deepEqual(captured[1].effort, { codex: "max", claude: "low", antigravity: "auto" });
   await services.shutdown();
 });
 
